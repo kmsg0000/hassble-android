@@ -37,6 +37,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -103,6 +104,12 @@ class BleRuntime(
     // apply()/restartScan()/stop()이 서로 다른 스레드에서 겹쳐도 세션이 둘이 되거나,
     // collect 중인 스캐너 캐시를 다른 쪽이 비우는 일이 없게.
     private val scanLifecycleMutex = Mutex()
+    // Request/response advertisement profiles (for example MyTown parking) can hit an Android BLE
+    // scanner state where the scan Flow is still alive but the expected response is no longer delivered.
+    // A short, rate-limited scan refresh before the request mirrors the manual gateway restart that
+    // recovers the device, without restarting the whole foreground service.
+    private val requestScanRefreshJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val lastRequestScanRefreshMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     // 필터에 막힌 수신은 UI 목록 발행을 UI_REFRESH_MS 단위로 모은다. true면 예약된 발행이 있다.
     private val sensorUiPublishPending = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var stopped = false
@@ -836,7 +843,7 @@ class BleRuntime(
         when (c.action) {
             ControlAction.advertise -> {
                 when (cmd.action) {
-                    "press", "turn_on" -> startAdvertise(d)
+                    "press", "turn_on" -> startAdvertiseForRequest(d)
                     "turn_off" -> stopAdvertise(d.id)
                 }
                 return
@@ -906,6 +913,64 @@ class BleRuntime(
         onLinkStatus(DeviceLinkStatus(deviceId, DeviceLinkState.Disconnected, mac))
     }
 
+    private fun startAdvertiseForRequest(d: DeviceConfig) {
+        val needsResponse = d.source == Source.advertisement && d.advertise?.stopOnResponse == true
+        if (!needsResponse) {
+            startAdvertise(d)
+            return
+        }
+
+        // If a refresh is already in progress, preserve this button press but wait until the new scan
+        // session is ready before transmitting. This prevents repeated HA presses from racing startScan().
+        requestScanRefreshJobs[d.id]?.takeIf { it.isActive }?.let { inFlight ->
+            scope.launch {
+                inFlight.join()
+                if (!stopped) startAdvertise(d)
+            }
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val lastRefresh = lastRequestScanRefreshMs[d.id] ?: 0L
+        if (now - lastRefresh < REQUEST_SCAN_REFRESH_COOLDOWN_MS) {
+            startAdvertise(d)
+            return
+        }
+
+        lastRequestScanRefreshMs[d.id] = now
+        val beforeSession = BleScanHealth.state.value.sessionCount
+        val job = scope.launch {
+            LiveEventLogger.log(LogType.LINK,
+                "device=${d.id}: refreshing BLE scan before request/response advertisement")
+
+            scanLifecycleMutex.withLock {
+                scanJob?.cancelAndJoin()
+                scanJob = null
+                scanner.stop()
+                if (stopped) return@withLock
+                launchScan()
+            }
+
+            val ready = withTimeoutOrNull(REQUEST_SCAN_READY_TIMEOUT_MS) {
+                BleScanHealth.state.first { health ->
+                    health.scanning && health.sessionCount > beforeSession
+                }
+            } != null
+
+            if (ready) {
+                LiveEventLogger.log(LogType.LINK,
+                    "device=${d.id}: BLE scan refresh ready — sending advertisement request")
+            } else {
+                LiveEventLogger.log(LogType.LINK,
+                    "[Warning] device=${d.id}: BLE scan refresh did not report ready within " +
+                        "${REQUEST_SCAN_READY_TIMEOUT_MS / 1000}s — sending request anyway")
+            }
+            if (!stopped) startAdvertise(d)
+        }
+        requestScanRefreshJobs[d.id] = job
+        job.invokeOnCompletion { requestScanRefreshJobs.remove(d.id, job) }
+    }
+
     private fun startAdvertise(d: DeviceConfig) {
         val advConfig = d.advertise ?: return
         if (ConfigValidator.hasDeviceError(validationIssues, d.id)) return
@@ -951,7 +1016,7 @@ class BleRuntime(
     fun triggerAdvertise(deviceId: String) {
         if (!::config.isInitialized) return
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
-        startAdvertise(d)
+        startAdvertiseForRequest(d)
     }
 
     /** 게이트웨이 실행 중 특정 기기의 BLE 광고 송신을 중단. */
@@ -989,6 +1054,9 @@ class BleRuntime(
         lastSensorValues.clear()
         publishSensorValues()
 
+        requestScanRefreshJobs.values.forEach { it.cancel() }
+        requestScanRefreshJobs.clear()
+        lastRequestScanRefreshMs.clear()
         pendingHaCleanupIds.clear()
         lastConfig = null
         lastEnabled = emptySet()
@@ -1153,5 +1221,7 @@ class BleRuntime(
         private const val PRESENCE_TICK_MS = 10_000L
         private const val UI_REFRESH_MS = 1_000L
         private const val COLLECTOR_RELAUNCH_DELAY_MS = 5_000L
+        private const val REQUEST_SCAN_REFRESH_COOLDOWN_MS = 15_000L
+        private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
     }
 }
