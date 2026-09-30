@@ -11,6 +11,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
+      - name: Apply request recovery patch
+        run: python tools/apply_request_timeout_recovery.py
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -37,6 +40,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
+
+      - name: Apply request recovery patch
+        run: python tools/apply_request_timeout_recovery.py
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -65,6 +71,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
+      - name: Apply request recovery patch
+        run: python tools/apply_request_timeout_recovery.py
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -77,3 +86,15 @@ jobs:
 
       - name: Assemble Debug APK
         run: ./gradlew assembleDebug
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk dist/HassBle-v1.7.2-request-timeout-recovery-debug.apk
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: hassble-request-timeout-recovery-debug-apk
+          path: dist/HassBle-v1.7.2-request-timeout-recovery-debug.apk
+          retention-days: 30
