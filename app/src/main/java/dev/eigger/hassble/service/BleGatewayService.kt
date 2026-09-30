@@ -49,6 +49,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 private data class SettingsSnapshot(
@@ -349,6 +352,11 @@ class BleGatewayService : Service() {
                     }
                 } }
             }
+            launch {
+                client.events.collect { event ->
+                    guarded("gateway control command") { handleGatewayControlEvent(client, event) }
+                }
+            }
             combine(client.connectionState, client.connectionIssue) { state, issue ->
                 state to issue
             }.collect { (state, issue) ->
@@ -582,6 +590,46 @@ class BleGatewayService : Service() {
             name = "Service Status", device = phoneDevice,
             deviceClass = "running", entityCategory = "diagnostic",
         ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_ble_gateway_status", platform = "binary_sensor",
+            name = "BLE Gateway Status", device = phoneDevice,
+            deviceClass = "running", entityCategory = "diagnostic",
+        ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_gateway_stop", platform = "button",
+            name = "게이트웨이 정지", device = phoneDevice, icon = "mdi:stop-circle-outline",
+        ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_gateway_start", platform = "button",
+            name = "게이트웨이 시작", device = phoneDevice, icon = "mdi:play-circle-outline",
+        ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_scan_restart", platform = "button",
+            name = "BLE 스캔 재시작", device = phoneDevice, icon = "mdi:restart",
+        ))
+    }
+
+    private fun handleGatewayControlEvent(client: HaWsClient, event: JsonObject) {
+        if (event["kind"]?.jsonPrimitive?.contentOrNull != "command") return
+        if (event["action"]?.jsonPrimitive?.contentOrNull != "press") return
+        val uniqueId = event["unique_id"]?.jsonPrimitive?.contentOrNull ?: return
+        val prefix = gatewayId()
+        when (uniqueId) {
+            "${prefix}_gateway_stop" -> {
+                runtime?.pauseBleGateway("HA button")
+                client.sendStates(listOf("${prefix}_ble_gateway_status" to "off"))
+                LiveEventLogger.log(LogType.LINK, "HA button: BLE gateway stop")
+            }
+            "${prefix}_gateway_start" -> {
+                runtime?.resumeBleGateway("HA button")
+                client.sendStates(listOf("${prefix}_ble_gateway_status" to "on"))
+                LiveEventLogger.log(LogType.LINK, "HA button: BLE gateway start")
+            }
+            "${prefix}_scan_restart" -> {
+                runtime?.restartScan("HA button")
+                LiveEventLogger.log(LogType.LINK, "HA button: BLE scan restart")
+            }
+        }
     }
 
     private fun publishGatewayStates(client: HaWsClient?) {
@@ -590,6 +638,7 @@ class BleGatewayService : Service() {
         c.sendStates(listOf(
             "${gatewayId()}_connection" to "on",
             "${gatewayId()}_service_status" to "on",
+            "${gatewayId()}_ble_gateway_status" to if (runtime?.bleGatewayRunning == true) "on" else "off",
         ))
     }
 

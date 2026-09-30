@@ -1,0 +1,44 @@
+name: Build request timeout recovery APK
+on:
+  push:
+    branches:
+      - fix/request-timeout-recovery
+permissions:
+  contents: write
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/request-timeout-recovery
+          fetch-depth: 0
+      - name: Apply patch
+        run: python tools/apply_request_timeout_recovery.py
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: gradle
+      - name: Test and build
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk dist/HassBle-v1.7.2-request-timeout-recovery-debug.apk
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hassble-request-timeout-recovery-debug-apk
+          path: dist/HassBle-v1.7.2-request-timeout-recovery-debug.apk
+          retention-days: 30
+      - name: Commit source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/dev/eigger/hassble/ble/BleRuntime.kt
+          git commit -m "fix: recover advertisement request only after timeout" || exit 0
+          git pull --rebase origin fix/request-timeout-recovery
+          git push origin HEAD:fix/request-timeout-recovery
