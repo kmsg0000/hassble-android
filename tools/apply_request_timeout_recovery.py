@@ -31,21 +31,31 @@ new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {
             return
         }
 
-        requestRecoveryJobs.remove(d.id)?.cancel()
+        // HA automations may press the request button repeatedly. Do not let duplicate presses reset
+        // the recovery timer or stack overlapping advertise stop/start cycles. One in-flight request
+        // owns the whole recovery sequence until a response arrives or the sequence finishes.
+        requestRecoveryJobs[d.id]?.takeIf { it.isActive }?.let {
+            LiveEventLogger.log(LogType.LINK,
+                "device=${d.id}: duplicate request ignored while recovery sequence is active")
+            return
+        }
+
         if (advertiser?.isAdvertising(d.id) == true) {
             advertiser.stop(d.id, AdvertiseStopReason.Manual)
         }
 
         LiveEventLogger.log(LogType.LINK,
-            "device=${d.id}: request started normally; recovery will run only if no response arrives")
+            "device=${d.id}: request started; waiting ${REQUEST_RESPONSE_TIMEOUT_MS}ms before recovery")
         startAdvertise(d)
 
         val job = scope.launch {
+            // Stage 1: keep the healthy path untouched for a full response window.
             delay(REQUEST_RESPONSE_TIMEOUT_MS)
             if (!isActive) return@launch
 
+            // Stage 2: recover only the request/advertising flow first.
             LiveEventLogger.log(LogType.LINK,
-                "[Warning] device=${d.id}: no response within ${REQUEST_RESPONSE_TIMEOUT_MS}ms — stopping stuck request and retrying")
+                "[Warning] device=${d.id}: response timeout — stop advertisement, wait, then retry once")
             advertiser?.stop(d.id, AdvertiseStopReason.Manual)
             delay(REQUEST_RETRY_GAP_MS)
             if (!isActive || blePaused || stopped) return@launch
@@ -54,8 +64,9 @@ new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {
             delay(REQUEST_RESPONSE_TIMEOUT_MS)
             if (!isActive) return@launch
 
+            // Stage 3: only if the clean advertise retry also fails, rebuild the BLE scan session.
             LiveEventLogger.log(LogType.LINK,
-                "[Warning] device=${d.id}: retry also timed out — refreshing BLE scan and trying once more")
+                "[Warning] device=${d.id}: retry timed out — refreshing BLE scan before final request")
             advertiser?.stop(d.id, AdvertiseStopReason.Manual)
 
             val beforeSession = BleScanHealth.state.value.sessionCount
@@ -118,8 +129,8 @@ s = s.replace('''        requestScanRefreshJobs.values.forEach { it.cancel() }
 ''')
 s = s.replace('''        private const val REQUEST_SCAN_REFRESH_COOLDOWN_MS = 15_000L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
-''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 3_000L
-        private const val REQUEST_RETRY_GAP_MS = 750L
+''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 5_000L
+        private const val REQUEST_RETRY_GAP_MS = 1_500L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
 ''')
 
