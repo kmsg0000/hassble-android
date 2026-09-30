@@ -1,0 +1,83 @@
+name: Apply request timeout recovery
+
+on:
+  push:
+    branches: [fix/request-timeout-recovery]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/request-timeout-recovery
+          fetch-depth: 0
+
+      - name: Patch request recovery
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('app/src/main/java/dev/eigger/hassble/ble/BleRuntime.kt')
+          s = p.read_text()
+
+          old_fields = '''    // Request/response advertisement profiles (for example MyTown parking) can hit an Android BLE\n    // scanner state where the scan Flow is still alive but the expected response is no longer delivered.\n    // A short, rate-limited scan refresh before the request mirrors the manual gateway restart that\n    // recovers the device, without restarting the whole foreground service.\n    private val requestScanRefreshJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()\n    private val lastRequestScanRefreshMs = java.util.concurrent.ConcurrentHashMap<String, Long>()\n'''
+          new_fields = '''    // Request/response advertisement recovery. Do not disturb a healthy scanner up front.\n    // Only recover when a request receives no matching response within the timeout.\n    private val requestRecoveryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()\n'''
+          if old_fields not in s:
+              raise SystemExit('request fields marker not found')
+          s = s.replace(old_fields, new_fields, 1)
+
+          start = s.index('    private fun startAdvertiseForRequest(d: DeviceConfig) {')
+          end = s.index('    private fun startAdvertise(d: DeviceConfig) {', start)
+          new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {\n        if (blePaused) {\n            LiveEventLogger.log(LogType.LINK, "device=${d.id}: advertise request ignored while BLE gateway is paused")\n            return\n        }\n        val needsResponse = d.source == Source.advertisement && d.advertise?.stopOnResponse == true\n        if (!needsResponse) {\n            startAdvertise(d)\n            return\n        }\n\n        // A new HA press supersedes any pending recovery from the previous press.\n        requestRecoveryJobs.remove(d.id)?.cancel()\n        if (advertiser?.isAdvertising(d.id) == true) {\n            advertiser.stop(d.id, AdvertiseStopReason.Manual)\n        }\n\n        LiveEventLogger.log(LogType.LINK,\n            "device=${d.id}: request started normally; recovery will run only if no response arrives")\n        startAdvertise(d)\n\n        val job = scope.launch {\n            // Stage 1: healthy path. Give the existing scanner a chance without touching it.\n            delay(REQUEST_RESPONSE_TIMEOUT_MS)\n            if (!isActive) return@launch\n\n            LiveEventLogger.log(LogType.LINK,\n                "[Warning] device=${d.id}: no response within ${REQUEST_RESPONSE_TIMEOUT_MS}ms — stopping stuck request and retrying")\n            advertiser?.stop(d.id, AdvertiseStopReason.Manual)\n            delay(REQUEST_RETRY_GAP_MS)\n            if (!isActive || blePaused || stopped) return@launch\n            startAdvertise(d)\n\n            // Stage 2: if the simple stop/retry also fails, refresh only the BLE scan session.\n            delay(REQUEST_RESPONSE_TIMEOUT_MS)\n            if (!isActive) return@launch\n\n            LiveEventLogger.log(LogType.LINK,\n                "[Warning] device=${d.id}: retry also timed out — refreshing BLE scan and trying once more")\n            advertiser?.stop(d.id, AdvertiseStopReason.Manual)\n\n            val beforeSession = BleScanHealth.state.value.sessionCount\n            scanLifecycleMutex.withLock {\n                scanJob?.cancelAndJoin()\n                scanJob = null\n                scanner.stop()\n                if (stopped || blePaused) return@withLock\n                launchScan()\n            }\n\n            withTimeoutOrNull(REQUEST_SCAN_READY_TIMEOUT_MS) {\n                BleScanHealth.state.first { health ->\n                    health.scanning && health.sessionCount > beforeSession\n                }\n            }\n            delay(REQUEST_RETRY_GAP_MS)\n            if (!isActive || blePaused || stopped) return@launch\n            startAdvertise(d)\n            LiveEventLogger.log(LogType.LINK,\n                "device=${d.id}: final request sent after BLE scan refresh")\n        }\n        requestRecoveryJobs[d.id] = job\n        job.invokeOnCompletion { requestRecoveryJobs.remove(d.id, job) }\n    }\n\n'''
+          s = s[:start] + new_method + s[end:]
+
+          # A matching advertisement is the success signal. Cancel pending recovery before normal decoding.\n          marker = '''            Source.advertisement -> {\n                val mac = r.macAddress ?: return\n                if (d.advertise?.stopOnResponse == true && advertiser?.isAdvertising(d.id) == true) {\n                    advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)\n                }\n'''
+          replacement = '''            Source.advertisement -> {\n                val mac = r.macAddress ?: return\n                if (d.advertise?.stopOnResponse == true) {\n                    requestRecoveryJobs.remove(d.id)?.cancel()\n                    if (advertiser?.isAdvertising(d.id) == true) {\n                        advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)\n                    }\n                    LiveEventLogger.log(LogType.LINK, "device=${d.id}: request response received — recovery cancelled")\n                }\n'''
+          if marker not in s:
+              raise SystemExit('advertisement response marker not found')
+          s = s.replace(marker, replacement, 1)
+
+          # Pause/stop cleanup: adapt old refresh-job cleanup to recovery jobs.
+          s = s.replace('''            requestScanRefreshJobs.values.forEach { it.cancel() }\n            requestScanRefreshJobs.clear()\n''', '''            requestRecoveryJobs.values.forEach { it.cancel() }\n            requestRecoveryJobs.clear()\n''')
+          s = s.replace('''        requestScanRefreshJobs.values.forEach { it.cancel() }\n        requestScanRefreshJobs.clear()\n        lastRequestScanRefreshMs.clear()\n''', '''        requestRecoveryJobs.values.forEach { it.cancel() }\n        requestRecoveryJobs.clear()\n''')
+
+          # Replace proactive-refresh constants with failure-only recovery timing.
+          s = s.replace('''        private const val REQUEST_SCAN_REFRESH_COOLDOWN_MS = 15_000L\n        private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L\n''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 3_000L\n        private const val REQUEST_RETRY_GAP_MS = 750L\n        private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L\n''')
+
+          p.write_text(s)
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: gradle
+
+      - name: Test and build
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk dist/HassBle-v1.7.2-request-timeout-recovery-debug.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hassble-request-timeout-recovery-debug-apk
+          path: dist/HassBle-v1.7.2-request-timeout-recovery-debug.apk
+          retention-days: 30
+
+      - name: Commit source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/dev/eigger/hassble/ble/BleRuntime.kt
+          git commit -m "fix: recover advertisement request only after timeout" || exit 0
+          git pull --rebase origin fix/request-timeout-recovery
+          git push origin HEAD:fix/request-timeout-recovery
