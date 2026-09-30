@@ -14,9 +14,10 @@ new_fields = '''    // Request/response advertisement recovery. Do not disturb a
     // Only recover when a request receives no matching response within the timeout.
     private val requestRecoveryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 '''
-if old_fields not in s:
-    raise SystemExit('request fields marker not found')
-s = s.replace(old_fields, new_fields, 1)
+if old_fields in s:
+    s = s.replace(old_fields, new_fields, 1)
+elif 'private val requestRecoveryJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()' not in s:
+    raise SystemExit('request recovery fields not found')
 
 start = s.index('    private fun startAdvertiseForRequest(d: DeviceConfig) {')
 end = s.index('    private fun startAdvertise(d: DeviceConfig) {', start)
@@ -31,9 +32,8 @@ new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {
             return
         }
 
-        // HA automations may press the request button repeatedly. Do not let duplicate presses reset
-        // the recovery timer or stack overlapping advertise stop/start cycles. One in-flight request
-        // owns the whole recovery sequence until a response arrives or the sequence finishes.
+        // HA may press repeatedly while its automation waits. Keep one request/recovery sequence alive
+        // instead of resetting the timer and stacking advertise stop/start operations.
         requestRecoveryJobs[d.id]?.takeIf { it.isActive }?.let {
             LiveEventLogger.log(LogType.LINK,
                 "device=${d.id}: duplicate request ignored while recovery sequence is active")
@@ -49,13 +49,14 @@ new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {
         startAdvertise(d)
 
         val job = scope.launch {
-            // Stage 1: keep the healthy path untouched for a full response window.
+            // Stage 1: normal request. Healthy scanners are left alone.
             delay(REQUEST_RESPONSE_TIMEOUT_MS)
             if (!isActive) return@launch
 
-            // Stage 2: recover only the request/advertising flow first.
+            // Stage 2: stop the possibly stuck advertise request, give Android time to release it,
+            // then retry without touching the scan session.
             LiveEventLogger.log(LogType.LINK,
-                "[Warning] device=${d.id}: response timeout — stop advertisement, wait, then retry once")
+                "[Warning] device=${d.id}: response timeout — stop advertisement and retry")
             advertiser?.stop(d.id, AdvertiseStopReason.Manual)
             delay(REQUEST_RETRY_GAP_MS)
             if (!isActive || blePaused || stopped) return@launch
@@ -64,7 +65,7 @@ new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {
             delay(REQUEST_RESPONSE_TIMEOUT_MS)
             if (!isActive) return@launch
 
-            // Stage 3: only if the clean advertise retry also fails, rebuild the BLE scan session.
+            // Stage 3: only after the clean advertise retry fails do we rebuild the BLE scanner.
             LiveEventLogger.log(LogType.LINK,
                 "[Warning] device=${d.id}: retry timed out — refreshing BLE scan before final request")
             advertiser?.stop(d.id, AdvertiseStopReason.Manual)
@@ -96,13 +97,13 @@ new_method = '''    private fun startAdvertiseForRequest(d: DeviceConfig) {
 '''
 s = s[:start] + new_method + s[end:]
 
-marker = '''            Source.advertisement -> {
+old_response = '''            Source.advertisement -> {
                 val mac = r.macAddress ?: return
                 if (d.advertise?.stopOnResponse == true && advertiser?.isAdvertising(d.id) == true) {
                     advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)
                 }
 '''
-replacement = '''            Source.advertisement -> {
+new_response = '''            Source.advertisement -> {
                 val mac = r.macAddress ?: return
                 if (d.advertise?.stopOnResponse == true) {
                     requestRecoveryJobs.remove(d.id)?.cancel()
@@ -112,9 +113,10 @@ replacement = '''            Source.advertisement -> {
                     LiveEventLogger.log(LogType.LINK, "device=${d.id}: request response received — recovery cancelled")
                 }
 '''
-if marker not in s:
-    raise SystemExit('advertisement response marker not found')
-s = s.replace(marker, replacement, 1)
+if old_response in s:
+    s = s.replace(old_response, new_response, 1)
+elif 'request response received — recovery cancelled' not in s:
+    raise SystemExit('advertisement response handler not found')
 
 s = s.replace('''            requestScanRefreshJobs.values.forEach { it.cancel() }
             requestScanRefreshJobs.clear()
@@ -127,7 +129,16 @@ s = s.replace('''        requestScanRefreshJobs.values.forEach { it.cancel() }
 ''', '''        requestRecoveryJobs.values.forEach { it.cancel() }
         requestRecoveryJobs.clear()
 ''')
+
+# Accept either the old proactive constants or the previous 3s/750ms recovery tuning.
 s = s.replace('''        private const val REQUEST_SCAN_REFRESH_COOLDOWN_MS = 15_000L
+        private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
+''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 5_000L
+        private const val REQUEST_RETRY_GAP_MS = 1_500L
+        private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
+''')
+s = s.replace('''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 3_000L
+        private const val REQUEST_RETRY_GAP_MS = 750L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
 ''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 5_000L
         private const val REQUEST_RETRY_GAP_MS = 1_500L
