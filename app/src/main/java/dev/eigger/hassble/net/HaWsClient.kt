@@ -280,9 +280,29 @@ class HaWsClient(
         pendingMessages.withLock {
             val queued = pendingMessages.drain()
             if (queued.isNotEmpty()) {
-                LiveEventLogger.log(LogType.LINK, "WS: flushing ${queued.size} queued message(s) after (re)connect")
+                LiveEventLogger.log(LogType.LINK, "WS: flushing ${queued.size} queued message(s) after (re)connect with fresh ids")
             }
-            for (text in queued) send(text)
+            for (text in queued) send(reassignQueuedMessageId(text))
+        }
+    }
+
+    /**
+     * Messages queued before ws_bridge/connect already have ids smaller than the connect message id.
+     * The bridge requires monotonically increasing identifiers on one WebSocket, so replaying those
+     * original ids causes `id_reuse: Identifier values have to increase`. Allocate a fresh id at
+     * flush time and move any request waiter to the replacement id.
+     */
+    private fun reassignQueuedMessageId(text: String): String {
+        return try {
+            val obj = json.parseToJsonElement(text).jsonObject
+            val oldId = obj["id"]?.jsonPrimitive?.content?.toIntOrNull() ?: return text
+            val newId = idGen.getAndIncrement()
+            pendingRequests.remove(oldId)?.let { pendingRequests[newId] = it }
+            JsonObject(obj.toMutableMap().apply { put("id", JsonPrimitive(newId)) }).toString()
+        } catch (e: Exception) {
+            LiveEventLogger.log(LogType.LINK,
+                "[Warning] WS: could not reassign queued message id (${e.localizedMessage}); sending original")
+            text
         }
     }
 
