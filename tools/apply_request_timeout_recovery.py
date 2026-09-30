@@ -130,19 +130,29 @@ s = s.replace('''        requestScanRefreshJobs.values.forEach { it.cancel() }
         requestRecoveryJobs.clear()
 ''')
 
-# Accept either the old proactive constants or the previous 3s/750ms recovery tuning.
-s = s.replace('''        private const val REQUEST_SCAN_REFRESH_COOLDOWN_MS = 15_000L
+# Fast recovery tuning for a garage exit that can take less than 30 seconds.
+fast_constants = '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 2_000L
+        private const val REQUEST_RETRY_GAP_MS = 500L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
-''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 5_000L
-        private const val REQUEST_RETRY_GAP_MS = 1_500L
+'''
+for previous in (
+    '''        private const val REQUEST_SCAN_REFRESH_COOLDOWN_MS = 15_000L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
-''')
-s = s.replace('''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 3_000L
+''',
+    '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 3_000L
         private const val REQUEST_RETRY_GAP_MS = 750L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
-''', '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 5_000L
+''',
+    '''        private const val REQUEST_RESPONSE_TIMEOUT_MS = 5_000L
         private const val REQUEST_RETRY_GAP_MS = 1_500L
         private const val REQUEST_SCAN_READY_TIMEOUT_MS = 5_000L
-''')
+''',
+):
+    if previous in s:
+        s = s.replace(previous, fast_constants, 1)
+        break
+else:
+    if fast_constants not in s:
+        raise SystemExit('request recovery constants not found')
 
 p.write_text(s)
