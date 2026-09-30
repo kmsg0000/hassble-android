@@ -113,6 +113,7 @@ class BleRuntime(
     // 필터에 막힌 수신은 UI 목록 발행을 UI_REFRESH_MS 단위로 모은다. true면 예약된 발행이 있다.
     private val sensorUiPublishPending = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var stopped = false
+    @Volatile private var blePaused = false
     // ── 파이프라인 진단 ──────────────────────────────────────────────────────
     // 수신값/HA 명령 한 건의 예외가 수집(collect) 전체를 끝내 "연결됨인데 아무것도 처리 안 됨" 상태로
     // 게이트웨이 재시작 전까지 남던 문제가 있었다. 이제 건별로 격리하고, 그 사실과 처리량을 heartbeat에 남긴다.
@@ -496,6 +497,7 @@ class BleRuntime(
                 .groupBy { it.mode to it.pid!!.uppercase() }
         }
         declareAndPrepare(d)
+        if (blePaused) return
 
         val resolved = resolveDeviceMac(d)
         val job = scope.launch {
@@ -587,6 +589,7 @@ class BleRuntime(
     }
 
     private fun launchScan() {
+        if (blePaused) return
         val adv = config.devices.filter { it.source == Source.advertisement }
         if (adv.isNotEmpty()) {
             val job = scanner.scan(adv, scanMode, unfilteredScan).onEach(::safeOnReading).launchIn(scope)
@@ -606,6 +609,10 @@ class BleRuntime(
      */
     fun restartScan(reason: String) {
         if (!::config.isInitialized) return
+        if (blePaused) {
+            LiveEventLogger.log(LogType.LINK, "BLE scan restart ignored while gateway is paused: $reason")
+            return
+        }
         if (config.devices.none { it.source == Source.advertisement }) return
         LiveEventLogger.log(LogType.LINK, "BLE scan restart requested: $reason")
         relaunchScan(reason)
@@ -618,8 +625,8 @@ class BleRuntime(
                 scanJob?.cancelAndJoin()
                 scanJob = null
                 scanner.stop()
-                // stop() 이후에 도착한 재시작 요청은 무시한다 — destroy 중에 세션을 다시 세우지 않게.
-                if (stopped) return@withLock
+                // stop() 이후에 도착한 재시작 요청은 무시한다 — destroy/pause 중에 세션을 다시 세우지 않게.
+                if (stopped || blePaused) return@withLock
                 launchScan()
                 // stop()은 mutex 밖에서 플래그만 세우므로, 위 검사와 launchScan() 사이에 끼어든 경우를
                 // 한 번 더 닫는다. 이 시점에 stopped면 방금 띄운 세션이 마지막이라 여기서 거둔다.
@@ -914,6 +921,10 @@ class BleRuntime(
     }
 
     private fun startAdvertiseForRequest(d: DeviceConfig) {
+        if (blePaused) {
+            LiveEventLogger.log(LogType.LINK, "device=${d.id}: advertise request ignored while BLE gateway is paused")
+            return
+        }
         val needsResponse = d.source == Source.advertisement && d.advertise?.stopOnResponse == true
         if (!needsResponse) {
             startAdvertise(d)
@@ -1025,6 +1036,50 @@ class BleRuntime(
     }
 
     fun isAdvertising(deviceId: String): Boolean = advertiser?.isAdvertising(deviceId) == true
+
+    val bleGatewayRunning: Boolean
+        get() = !stopped && !blePaused
+
+    /** Soft-stop BLE while leaving the foreground service and HA WebSocket connected. */
+    fun pauseBleGateway(reason: String = "HA command") {
+        if (stopped || blePaused) return
+        blePaused = true
+        LiveEventLogger.log(LogType.LINK, "BLE gateway pause requested: $reason")
+        scope.launch {
+            scanLifecycleMutex.withLock {
+                scanJob?.cancelAndJoin()
+                scanJob = null
+                scanner.stop()
+            }
+            presenceJob?.cancel()
+            presenceJob = null
+            requestScanRefreshJobs.values.forEach { it.cancel() }
+            requestScanRefreshJobs.clear()
+            deviceConnectionJobs.values.forEach { it.cancel() }
+            deviceConnectionJobs.clear()
+            if (::config.isInitialized) {
+                for (d in config.devices) {
+                    when (d.source) {
+                        Source.gatt_notify -> gatt.disconnect(d.id)
+                        Source.obd -> obd.disconnect(d.id)
+                        else -> {}
+                    }
+                }
+            }
+            advertiser?.stopAll()
+            BleScanHealth.onScanStopped("gateway paused: $reason")
+            LiveEventLogger.log(LogType.LINK, "BLE gateway paused; HA WebSocket remains connected")
+        }
+    }
+
+    /** Resume BLE after a soft stop. */
+    fun resumeBleGateway(reason: String = "HA command") {
+        if (stopped || !blePaused || !::config.isInitialized) return
+        blePaused = false
+        LiveEventLogger.log(LogType.LINK, "BLE gateway resume requested: $reason")
+        relaunchScan("gateway resumed: $reason")
+        for (d in config.devices) startDevice(d)
+    }
 
     fun stop() {
         // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.
