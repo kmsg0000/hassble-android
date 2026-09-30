@@ -1,0 +1,110 @@
+name: Apply HA gateway controls v2
+
+on:
+  push:
+    branches: [feat/ha-gateway-controls]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ha-gateway-controls
+          fetch-depth: 0
+
+      - name: Patch sources
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def rep(path, old, new, require_one=True):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count == 0 or (require_one and count != 1):
+                  raise SystemExit(f"bad match count {count} in {path}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          runtime = "app/src/main/java/dev/eigger/hassble/ble/BleRuntime.kt"
+          service = "app/src/main/java/dev/eigger/hassble/service/BleGatewayService.kt"
+
+          rep(runtime,
+              "    @Volatile private var stopped = false\n",
+              "    @Volatile private var stopped = false\n    @Volatile private var blePaused = false\n")
+          rep(runtime,
+              "        declareAndPrepare(d)\n\n        val resolved = resolveDeviceMac(d)\n",
+              "        declareAndPrepare(d)\n        if (blePaused) return\n\n        val resolved = resolveDeviceMac(d)\n")
+          rep(runtime,
+              "    private fun launchScan() {\n        val adv = config.devices.filter { it.source == Source.advertisement }\n",
+              "    private fun launchScan() {\n        if (blePaused) return\n        val adv = config.devices.filter { it.source == Source.advertisement }\n")
+          rep(runtime,
+              "    fun restartScan(reason: String) {\n        if (!::config.isInitialized) return\n",
+              "    fun restartScan(reason: String) {\n        if (!::config.isInitialized) return\n        if (blePaused) {\n            LiveEventLogger.log(LogType.LINK, \"BLE scan restart ignored while gateway is paused: $reason\")\n            return\n        }\n")
+          rep(runtime,
+              "                scanner.stop()\n                // stop() 이후에 도착한 재시작 요청은 무시한다 — destroy 중에 세션을 다시 세우지 않게.\n                if (stopped) return@withLock\n                launchScan()\n",
+              "                scanner.stop()\n                // stop() 이후에 도착한 재시작 요청은 무시한다 — destroy/pause 중에 세션을 다시 세우지 않게.\n                if (stopped || blePaused) return@withLock\n                launchScan()\n")
+          rep(runtime,
+              "    private fun startAdvertiseForRequest(d: DeviceConfig) {\n        val needsResponse = d.source == Source.advertisement && d.advertise?.stopOnResponse == true\n",
+              "    private fun startAdvertiseForRequest(d: DeviceConfig) {\n        if (blePaused) {\n            LiveEventLogger.log(LogType.LINK, \"device=${d.id}: advertise request ignored while BLE gateway is paused\")\n            return\n        }\n        val needsResponse = d.source == Source.advertisement && d.advertise?.stopOnResponse == true\n")
+
+          pause_resume = '''    val bleGatewayRunning: Boolean\n        get() = !stopped && !blePaused\n\n    /** Soft-stop BLE while leaving the foreground service and HA WebSocket connected. */\n    fun pauseBleGateway(reason: String = "HA command") {\n        if (stopped || blePaused) return\n        blePaused = true\n        LiveEventLogger.log(LogType.LINK, "BLE gateway pause requested: $reason")\n        scope.launch {\n            scanLifecycleMutex.withLock {\n                scanJob?.cancelAndJoin()\n                scanJob = null\n                scanner.stop()\n            }\n            presenceJob?.cancel()\n            presenceJob = null\n            requestScanRefreshJobs.values.forEach { it.cancel() }\n            requestScanRefreshJobs.clear()\n            deviceConnectionJobs.values.forEach { it.cancel() }\n            deviceConnectionJobs.clear()\n            if (::config.isInitialized) {\n                for (d in config.devices) {\n                    when (d.source) {\n                        Source.gatt_notify -> gatt.disconnect(d.id)\n                        Source.obd -> obd.disconnect(d.id)\n                        else -> {}\n                    }\n                }\n            }\n            advertiser?.stopAll()\n            BleScanHealth.onScanStopped("gateway paused: $reason")\n            LiveEventLogger.log(LogType.LINK, "BLE gateway paused; HA WebSocket remains connected")\n        }\n    }\n\n    /** Resume BLE after a soft stop. */\n    fun resumeBleGateway(reason: String = "HA command") {\n        if (stopped || !blePaused || !::config.isInitialized) return\n        blePaused = false\n        LiveEventLogger.log(LogType.LINK, "BLE gateway resume requested: $reason")\n        relaunchScan("gateway resumed: $reason")\n        for (d in config.devices) startDevice(d)\n    }\n\n'''
+          rep(runtime,
+              "    fun stop() {\n        // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.\n",
+              pause_resume + "    fun stop() {\n        // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.\n")
+
+          rep(service,
+              "import kotlinx.coroutines.launch\nimport java.io.File\n",
+              "import kotlinx.coroutines.launch\nimport kotlinx.serialization.json.JsonObject\nimport kotlinx.serialization.json.contentOrNull\nimport kotlinx.serialization.json.jsonPrimitive\nimport java.io.File\n")
+
+          collector = '''            launch {\n                client.events.collect { event ->\n                    guarded("gateway control command") { handleGatewayControlEvent(client, event) }\n                }\n            }\n'''
+          rep(service,
+              "            combine(client.connectionState, client.connectionIssue) { state, issue ->\n",
+              collector + "            combine(client.connectionState, client.connectionIssue) { state, issue ->\n")
+
+          old = '''        client.declareEntity(EntityMsg(\n            id = 0, uniqueId = "${gatewayId()}_service_status", platform = "binary_sensor",\n            name = "Service Status", device = phoneDevice,\n            deviceClass = "running", entityCategory = "diagnostic",\n        ))\n'''
+          new = old + '''        client.declareEntity(EntityMsg(\n            id = 0, uniqueId = "${gatewayId()}_ble_gateway_status", platform = "binary_sensor",\n            name = "BLE Gateway Status", device = phoneDevice,\n            deviceClass = "running", entityCategory = "diagnostic",\n        ))\n        client.declareEntity(EntityMsg(\n            id = 0, uniqueId = "${gatewayId()}_gateway_stop", platform = "button",\n            name = "게이트웨이 정지", device = phoneDevice, icon = "mdi:stop-circle-outline",\n        ))\n        client.declareEntity(EntityMsg(\n            id = 0, uniqueId = "${gatewayId()}_gateway_start", platform = "button",\n            name = "게이트웨이 시작", device = phoneDevice, icon = "mdi:play-circle-outline",\n        ))\n        client.declareEntity(EntityMsg(\n            id = 0, uniqueId = "${gatewayId()}_scan_restart", platform = "button",\n            name = "BLE 스캔 재시작", device = phoneDevice, icon = "mdi:restart",\n        ))\n'''
+          rep(service, old, new)
+
+          handler = '''    private fun handleGatewayControlEvent(client: HaWsClient, event: JsonObject) {\n        if (event["kind"]?.jsonPrimitive?.contentOrNull != "command") return\n        if (event["action"]?.jsonPrimitive?.contentOrNull != "press") return\n        val uniqueId = event["unique_id"]?.jsonPrimitive?.contentOrNull ?: return\n        val prefix = gatewayId()\n        when (uniqueId) {\n            "${prefix}_gateway_stop" -> {\n                runtime?.pauseBleGateway("HA button")\n                client.sendStates(listOf("${prefix}_ble_gateway_status" to "off"))\n                LiveEventLogger.log(LogType.LINK, "HA button: BLE gateway stop")\n            }\n            "${prefix}_gateway_start" -> {\n                runtime?.resumeBleGateway("HA button")\n                client.sendStates(listOf("${prefix}_ble_gateway_status" to "on"))\n                LiveEventLogger.log(LogType.LINK, "HA button: BLE gateway start")\n            }\n            "${prefix}_scan_restart" -> {\n                runtime?.restartScan("HA button")\n                LiveEventLogger.log(LogType.LINK, "HA button: BLE scan restart")\n            }\n        }\n    }\n\n'''
+          rep(service,
+              "    private fun publishGatewayStates(client: HaWsClient?) {\n",
+              handler + "    private fun publishGatewayStates(client: HaWsClient?) {\n")
+          rep(service,
+              "            \"${gatewayId()}_service_status\" to \"on\",\n        ))\n",
+              "            \"${gatewayId()}_service_status\" to \"on\",\n            \"${gatewayId()}_ble_gateway_status\" to if (runtime?.bleGatewayRunning == true) \"on\" else \"off\",\n        ))\n")
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: gradle
+
+      - name: Test and build
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+
+      - name: Stage APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/*.apk dist/HassBle-v1.7.2-ha-gateway-controls-debug.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hassble-ha-gateway-controls-debug-apk
+          path: dist/HassBle-v1.7.2-ha-gateway-controls-debug.apk
+          retention-days: 30
+
+      - name: Commit source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/dev/eigger/hassble/ble/BleRuntime.kt app/src/main/java/dev/eigger/hassble/service/BleGatewayService.kt
+          git commit -m "feat: add HA gateway start stop and scan restart controls" || exit 0
+          git pull --rebase origin feat/ha-gateway-controls
+          git push origin HEAD:feat/ha-gateway-controls
