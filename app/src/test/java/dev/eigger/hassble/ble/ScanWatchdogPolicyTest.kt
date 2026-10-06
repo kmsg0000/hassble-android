@@ -58,6 +58,14 @@ class ScanWatchdogPolicyTest {
     }
 
     @Test
+    fun `hard reset starts after two consecutive idle watchdog restarts`() {
+        assertEquals(false, ScanWatchdogPolicy.shouldHardReset(0))
+        assertEquals(false, ScanWatchdogPolicy.shouldHardReset(1))
+        assertEquals(true, ScanWatchdogPolicy.shouldHardReset(2))
+        assertEquals(true, ScanWatchdogPolicy.shouldHardReset(3))
+    }
+
+    @Test
     fun `health snapshot describes last result age and session`() {
         val snap = ScanHealthSnapshot(
             scanning = true, sessionStartMs = start, lastResultMs = start + 5_000,
