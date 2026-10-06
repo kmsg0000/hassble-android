@@ -42,6 +42,7 @@ import no.nordicsemi.android.kotlin.ble.core.scanner.FilteredManufacturerData
 import no.nordicsemi.android.kotlin.ble.core.scanner.FilteredServiceData
 import dev.eigger.hassble.config.BleScanModeOption
 import dev.eigger.hassble.R
+import dev.eigger.hassble.service.BleGatewayService
 import dev.eigger.hassble.service.LiveEventLogger
 import dev.eigger.hassble.service.LogType
 import java.util.UUID
@@ -338,7 +339,10 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                 if (e.message?.startsWith("no ScanResult") == true) {
                     val stalls = consecutiveWatchdogIdleRestarts.incrementAndGet()
                     if (ScanWatchdogPolicy.shouldHardReset(stalls)) {
-                        hardResetScanner("no ScanResult after $stalls watchdog restart(s)")
+                        val reason = "no ScanResult after $stalls watchdog restart(s)"
+                        hardResetScanner(reason)
+                        LiveEventLogger.log(LogType.LINK, "BLE remained stalled after hard reset threshold — restarting whole gateway service")
+                        BleGatewayService.restart(context, reason)
                         consecutiveWatchdogIdleRestarts.set(0)
                         hardResetPerformed = true
                     }
