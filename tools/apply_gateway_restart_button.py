@@ -126,7 +126,10 @@ if 'private fun restartGatewayPipeline(reason: String)' not in s:
 
 # 5) Quiet period between teardown and rebuild.
 const_marker = '        private const val BLE_RESET_QUIET_MS = 1_500L\n'
-if const_marker in s and 'GATEWAY_RESTART_QUIET_MS' not in s:
-    s = s.replace(const_marker, const_marker + '        private const val GATEWAY_RESTART_QUIET_MS = 1_500L\n', 1)
+const_decl = '        private const val GATEWAY_RESTART_QUIET_MS = 1_500L\n'
+if const_marker in s and const_decl not in s:
+    s = s.replace(const_marker, const_marker + const_decl, 1)
+elif const_decl not in s:
+    raise SystemExit('BLE reset constant marker not found')
 
 p.write_text(s)
