@@ -160,6 +160,12 @@ class BleGatewayService : Service() {
             return START_STICKY
         }
 
+        if (intent.action == ACTION_RESTART_FROM_SAVED) {
+            LiveEventLogger.log(LogType.LINK, "Gateway service restarted from saved settings")
+            restoreFromSavedSettings(startId)
+            return START_STICKY
+        }
+
         if (intent.action == ACTION_RELOAD_CONFIG) {
             intent.getStringExtra(EXTRA_GIT_URL)?.let { currentGitUrl = it }
             if (intent.hasExtra(EXTRA_GIT_TOKEN)) {
@@ -736,6 +742,7 @@ class BleGatewayService : Service() {
         const val EXTRA_GIT_TOKEN = "git_token"
         private const val EXTRA_DEVICE_ID = "device_id"
         private const val ACTION_RELOAD_CONFIG = "dev.eigger.hassble.RELOAD_CONFIG"
+        private const val ACTION_RESTART_FROM_SAVED = "dev.eigger.hassble.RESTART_FROM_SAVED"
         private const val ACTION_REMOVE_DEVICE = "dev.eigger.hassble.REMOVE_DEVICE"
         private const val ACTION_SET_AUTO_CONNECT = "dev.eigger.hassble.SET_AUTO_CONNECT"
         private const val EXTRA_AUTO_CONNECT = "auto_connect"
@@ -791,6 +798,17 @@ class BleGatewayService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, BleGatewayService::class.java))
+        }
+
+        fun restart(context: Context, reason: String) {
+            val appContext = context.applicationContext
+            LiveEventLogger.log(LogType.LINK, "Gateway full restart requested: $reason")
+            appContext.stopService(Intent(appContext, BleGatewayService::class.java))
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                val i = Intent(appContext, BleGatewayService::class.java)
+                    .setAction(ACTION_RESTART_FROM_SAVED)
+                androidx.core.content.ContextCompat.startForegroundService(appContext, i)
+            }, 1_500L)
         }
 
         fun removeDevice(context: Context, deviceId: String) {

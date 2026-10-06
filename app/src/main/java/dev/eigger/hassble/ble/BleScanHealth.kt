@@ -89,6 +89,11 @@ object ScanWatchdogPolicy {
     const val TICK_MS = 5_000L
     /** stopScan() 후 startScan()까지 쉬는 시간 — 스택이 이전 세션을 정리할 여유. */
     const val RESTART_DELAY_MS = 1_000L
+    /** 연속 watchdog 무수신 재시작이 이 횟수에 도달하면 BleScanner 객체 자체를 새로 만든다. */
+    const val HARD_RESET_AFTER_IDLE_RESTARTS = 2
+
+    fun shouldHardReset(consecutiveIdleRestarts: Int): Boolean =
+        consecutiveIdleRestarts >= HARD_RESET_AFTER_IDLE_RESTARTS
 
     /**
      * 유휴 재시작이 연속 [consecutiveIdleRestarts]번 이어졌을 때 다음 세션의 유휴 한도.

@@ -77,3 +77,10 @@ jobs:
 
       - name: Assemble Debug APK
         run: ./gradlew assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: hassble-auto-restart-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

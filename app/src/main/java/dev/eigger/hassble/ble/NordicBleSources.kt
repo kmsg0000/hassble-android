@@ -42,6 +42,7 @@ import no.nordicsemi.android.kotlin.ble.core.scanner.FilteredManufacturerData
 import no.nordicsemi.android.kotlin.ble.core.scanner.FilteredServiceData
 import dev.eigger.hassble.config.BleScanModeOption
 import dev.eigger.hassble.R
+import dev.eigger.hassble.service.BleGatewayService
 import dev.eigger.hassble.service.LiveEventLogger
 import dev.eigger.hassble.service.LogType
 import java.util.UUID
@@ -65,7 +66,8 @@ private const val PREREQ_POLL_MS = 2_000L
  * 매칭되는 기기의 페이로드 데이터를 추출하여 방출합니다.
  */
 class NordicAdvertisementScanner(private val context: Context) : AdvertisementScanner {
-    private val scanner by lazy { BleScanner(context) }
+    @Volatile private var scanner = BleScanner(context)
+    private val consecutiveWatchdogIdleRestarts = java.util.concurrent.atomic.AtomicInteger(0)
 
     // Simple cache to merge ADV_IND and SCAN_RSP data per MAC address.
     // stop()은 collect 코루틴과 다른 스레드에서 불릴 수 있어(서비스 destroy, 설정 변경) clear()가
@@ -119,7 +121,6 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
         scanMode: BleScanModeOption,
         unfiltered: Boolean
     ): Flow<RawReading> = flow {
-        val scanner = this@NordicAdvertisementScanner.scanner
         Log.d(TAG, "Starting Nordic BLE scan for ${devices.size} advertisement profiles (unfiltered=$unfiltered)")
         LiveEventLogger.log(LogType.LINK, "Starting Nordic BLE scan for ${devices.size} profiles (unfiltered=$unfiltered)...")
 
@@ -150,11 +151,13 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
             awaitScanThrottleSlot()
 
             val idleLimitMs = ScanWatchdogPolicy.idleLimitMs(consecutiveIdleRestarts)
+            val sessionScanner = scanner
             val sessionStartMs = System.currentTimeMillis()
             lastResultMs.set(sessionStartMs)
             var gotResultThisSession = false
             var stopReason = "flow ended"
             var failureCode: Int? = null
+            var hardResetPerformed = false
             BleScanHealth.onScanStarted(sessionStartMs, scanFilters.size)
             LiveEventLogger.log(LogType.LINK,
                 "BLE scan start: session #${BleScanHealth.state.value.sessionCount}, mode=${scanMode.label}, " +
@@ -177,10 +180,11 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                         }
                     }
                     try {
-                        scanner.scan(filters = scanFilters, settings = scanSettings).collect { result ->
+                        sessionScanner.scan(filters = scanFilters, settings = scanSettings).collect { result ->
                             val now = System.currentTimeMillis()
                             lastResultMs.set(now)
                             gotResultThisSession = true
+                            consecutiveWatchdogIdleRestarts.set(0)
                             BleScanHealth.onResult(now)
                             val deviceName = result.device.name ?: ""
                             val deviceAddress = result.device.address
@@ -332,6 +336,17 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                 stopReason = "watchdog: ${e.message}"
                 Log.w(TAG, "BLE scan watchdog restart: ${e.message}")
                 LiveEventLogger.log(LogType.LINK, "BLE scan restart: ${e.message}")
+                if (e.message?.startsWith("no ScanResult") == true) {
+                    val stalls = consecutiveWatchdogIdleRestarts.incrementAndGet()
+                    if (ScanWatchdogPolicy.shouldHardReset(stalls)) {
+                        val reason = "no ScanResult after $stalls watchdog restart(s)"
+                        hardResetScanner(reason)
+                        LiveEventLogger.log(LogType.LINK, "BLE remained stalled after hard reset threshold — restarting whole gateway service")
+                        BleGatewayService.restart(context, reason)
+                        consecutiveWatchdogIdleRestarts.set(0)
+                        hardResetPerformed = true
+                    }
+                }
             } catch (e: ScanningFailedException) {
                 failureCode = e.errorCode.value
                 stopReason = "onScanFailed ${e.errorCode}"
@@ -344,7 +359,7 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                 LiveEventLogger.log(LogType.LINK, "BLE scan error: ${e.localizedMessage}, restarting...")
             }
             BleScanHealth.onScanStopped(stopReason, failureCode)
-            consecutiveIdleRestarts = if (gotResultThisSession) 0 else consecutiveIdleRestarts + 1
+            consecutiveIdleRestarts = if (gotResultThisSession || hardResetPerformed) 0 else consecutiveIdleRestarts + 1
             // 스택이 이전 세션을 정리할 시간을 준 뒤 startScan() 한다.
             delay(ScanWatchdogPolicy.RESTART_DELAY_MS)
         }
@@ -421,7 +436,17 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
         }
     }
 
+    private fun hardResetScanner(reason: String) {
+        scanner = BleScanner(context)
+        manufacturerDataCache.clear()
+        serviceDataCache.clear()
+        serviceUuidsCache.clear()
+        cacheTimestamps.clear()
+        LiveEventLogger.log(LogType.LINK, "BLE scanner hard reset: $reason — created a fresh BleScanner instance")
+    }
+
     override fun stop() {
+        consecutiveWatchdogIdleRestarts.set(0)
         manufacturerDataCache.clear()
         serviceDataCache.clear()
         serviceUuidsCache.clear()
