@@ -962,6 +962,9 @@ class BleRuntime(
     fun isAdvertising(deviceId: String): Boolean = advertiser?.isAdvertising(deviceId) == true
 
     fun stop() {
+        // HA 게이트웨이 재시작 시 이전 runtime의 command collector가 남아 중복 처리하지 않도록 먼저 종료한다.
+        eventJob?.cancel()
+        eventJob = null
         // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.
         stopped = true
         scanJob?.cancel()
