@@ -1,4 +1,4 @@
-name: ChatGPT Signed APK Build
+name: ChatGPT APK Build
 
 on:
   push:
@@ -24,20 +24,12 @@ jobs:
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
 
-      - name: Decode keystore
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \r\n' | base64 -d > "${{ github.workspace }}/hassble-release.jks"
-
-      - name: Build signed release APK
-        run: ./gradlew assembleRelease
-        env:
-          KEYSTORE_FILE: ${{ github.workspace }}/hassble-release.jks
-          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.KEYSTORE_PASS }}
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: HassBle-v1.7.3-release
-          path: app/build/outputs/apk/release/*.apk
+          name: HassBle-v1.7.3-debug
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
