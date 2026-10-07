@@ -1,0 +1,43 @@
+name: ChatGPT Signed APK Build
+
+on:
+  push:
+    branches:
+      - chatgpt/gateway-controls-1.7.3
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant Execute Permission for Gradlew
+        run: chmod +x gradlew
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | tr -d ' \r\n' | base64 -d > "${{ github.workspace }}/hassble-release.jks"
+
+      - name: Build signed release APK
+        run: ./gradlew assembleRelease
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/hassble-release.jks
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEYSTORE_PASS }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: HassBle-v1.7.3-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
