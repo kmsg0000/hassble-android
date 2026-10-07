@@ -49,6 +49,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 private data class SettingsSnapshot(
@@ -81,6 +82,7 @@ class BleGatewayService : Service() {
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var configJob: Job? = null
     private var wsStateJob: Job? = null
+    private var gatewayCommandJob: Job? = null
     private var heartbeatJob: Job? = null
     private var settingsJob: Job? = null
     private var currentGitUrl: String = ""
@@ -307,6 +309,44 @@ class BleGatewayService : Service() {
             ws = it
         }
 
+        gatewayCommandJob?.cancel()
+        gatewayCommandJob = scope.launch {
+            client.events.collect { event ->
+                if (event["kind"]?.jsonPrimitive?.content != "command") return@collect
+                if (event["action"]?.jsonPrimitive?.content != "press") return@collect
+
+                val uid = event["unique_id"]?.jsonPrimitive?.content ?: return@collect
+                when (uid) {
+                    "${gatewayId()}_gateway_start" -> {
+                        if (runtime == null) {
+                            LiveEventLogger.log(LogType.LINK, "HA command: Gateway Start")
+                            reloadConfig()
+                        } else {
+                            LiveEventLogger.log(LogType.LINK, "HA command: Gateway Start ignored (already running)")
+                        }
+                    }
+                    "${gatewayId()}_gateway_stop" -> {
+                        LiveEventLogger.log(LogType.LINK, "HA command: Gateway Stop")
+                        settingsJob?.cancel()
+                        settingsJob = null
+                        runtime?.stop()
+                        runtime = null
+                        client.sendStates(listOf("${gatewayId()}_gateway_running" to "off"))
+                        updateNotification()
+                    }
+                    "${gatewayId()}_gateway_restart" -> {
+                        LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart")
+                        settingsJob?.cancel()
+                        settingsJob = null
+                        runtime?.stop()
+                        runtime = null
+                        client.sendStates(listOf("${gatewayId()}_gateway_running" to "off"))
+                        reloadConfig()
+                    }
+                }
+            }
+        }
+
         wsStateJob?.cancel()
         var lastIssue: ConnectionIssue = ConnectionIssue.None
         wsStateJob = scope.launch {
@@ -512,6 +552,7 @@ class BleGatewayService : Service() {
                     },
                     onPipelineError = { runCatching { updateNotification() } },
                 ).also { it.start() }
+                publishGatewayStates(client)
             }
 
             settingsJob = scope.launch {
@@ -582,6 +623,26 @@ class BleGatewayService : Service() {
             name = "Service Status", device = phoneDevice,
             deviceClass = "running", entityCategory = "diagnostic",
         ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_gateway_running", platform = "binary_sensor",
+            name = "Gateway Running", device = phoneDevice,
+            deviceClass = "running", entityCategory = "diagnostic",
+        ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_gateway_start", platform = "button",
+            name = "Gateway Start", device = phoneDevice,
+            icon = "mdi:play",
+        ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_gateway_stop", platform = "button",
+            name = "Gateway Stop", device = phoneDevice,
+            icon = "mdi:stop",
+        ))
+        client.declareEntity(EntityMsg(
+            id = 0, uniqueId = "${gatewayId()}_gateway_restart", platform = "button",
+            name = "Gateway Restart", device = phoneDevice,
+            icon = "mdi:restart",
+        ))
     }
 
     private fun publishGatewayStates(client: HaWsClient?) {
@@ -590,6 +651,7 @@ class BleGatewayService : Service() {
         c.sendStates(listOf(
             "${gatewayId()}_connection" to "on",
             "${gatewayId()}_service_status" to "on",
+            "${gatewayId()}_gateway_running" to if (runtime != null) "on" else "off",
         ))
     }
 
@@ -606,6 +668,7 @@ class BleGatewayService : Service() {
         configJob?.cancel()
         settingsJob?.cancel()
         wsStateJob?.cancel()
+        gatewayCommandJob?.cancel()
         heartbeatJob?.cancel()
         runtime?.stop()
         ws?.close()
