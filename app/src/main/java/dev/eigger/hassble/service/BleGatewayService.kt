@@ -82,7 +82,6 @@ class BleGatewayService : Service() {
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var configJob: Job? = null
     private var wsStateJob: Job? = null
-    private var gatewayCommandJob: Job? = null
     private var heartbeatJob: Job? = null
     private var settingsJob: Job? = null
     private var currentGitUrl: String = ""
@@ -303,48 +302,15 @@ class BleGatewayService : Service() {
             refreshToken = refreshToken,
             onTokenRefreshed = { newToken ->
                 HassSettingsRepository(applicationContext).saveHaSettings(haUrl, newToken)
+            },
+            onCommandEvent = { event ->
+                scope.launch {
+                    handleGatewayCommand(event)
+                }
             }
         ).also {
             it.connect()
             ws = it
-        }
-
-        gatewayCommandJob?.cancel()
-        gatewayCommandJob = scope.launch {
-            client.events.collect { event ->
-                if (event["kind"]?.jsonPrimitive?.content != "command") return@collect
-                if (event["action"]?.jsonPrimitive?.content != "press") return@collect
-
-                val uid = event["unique_id"]?.jsonPrimitive?.content ?: return@collect
-                when (uid) {
-                    "${gatewayId()}_gateway_start" -> {
-                        if (runtime == null) {
-                            LiveEventLogger.log(LogType.LINK, "HA command: Gateway Start")
-                            reloadConfig()
-                        } else {
-                            LiveEventLogger.log(LogType.LINK, "HA command: Gateway Start ignored (already running)")
-                        }
-                    }
-                    "${gatewayId()}_gateway_stop" -> {
-                        LiveEventLogger.log(LogType.LINK, "HA command: Gateway Stop")
-                        settingsJob?.cancel()
-                        settingsJob = null
-                        runtime?.stop()
-                        runtime = null
-                        client.sendStates(listOf("${gatewayId()}_gateway_running" to "off"))
-                        updateNotification()
-                    }
-                    "${gatewayId()}_gateway_restart" -> {
-                        LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart")
-                        settingsJob?.cancel()
-                        settingsJob = null
-                        runtime?.stop()
-                        runtime = null
-                        client.sendStates(listOf("${gatewayId()}_gateway_running" to "off"))
-                        reloadConfig()
-                    }
-                }
-            }
         }
 
         wsStateJob?.cancel()
@@ -611,6 +577,45 @@ class BleGatewayService : Service() {
         android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
             ?: "hassble"
 
+    private fun handleGatewayCommand(event: kotlinx.serialization.json.JsonObject) {
+        if (event["kind"]?.jsonPrimitive?.content != "command") return
+        val action = event["action"]?.jsonPrimitive?.content
+        val uid = event["unique_id"]?.jsonPrimitive?.content ?: return
+        LiveEventLogger.log(LogType.LINK, "HA gateway command received: unique_id=$uid, action=$action")
+        if (action != "press") return
+
+        val gid = gatewayId()
+        when {
+            uid == "${gid}_gateway_start" || uid.endsWith("__${gid}_gateway_start") || uid.endsWith("_gateway_start") -> {
+                if (runtime == null) {
+                    LiveEventLogger.log(LogType.LINK, "HA command: Gateway Start")
+                    reloadConfig()
+                } else {
+                    LiveEventLogger.log(LogType.LINK, "HA command: Gateway Start ignored (already running)")
+                    publishGatewayStates(ws)
+                }
+            }
+            uid == "${gid}_gateway_stop" || uid.endsWith("__${gid}_gateway_stop") || uid.endsWith("_gateway_stop") -> {
+                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Stop")
+                settingsJob?.cancel()
+                settingsJob = null
+                runtime?.stop()
+                runtime = null
+                ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
+                updateNotification()
+            }
+            uid == "${gid}_gateway_restart" || uid.endsWith("__${gid}_gateway_restart") || uid.endsWith("_gateway_restart") -> {
+                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart")
+                settingsJob?.cancel()
+                settingsJob = null
+                runtime?.stop()
+                runtime = null
+                ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
+                reloadConfig()
+            }
+        }
+    }
+
     private fun declareGatewayEntities(client: HaWsClient) {
         val phoneDevice = DeviceRef(gatewayId(), android.os.Build.MODEL)
         client.declareEntity(EntityMsg(
@@ -668,7 +673,6 @@ class BleGatewayService : Service() {
         configJob?.cancel()
         settingsJob?.cancel()
         wsStateJob?.cancel()
-        gatewayCommandJob?.cancel()
         heartbeatJob?.cancel()
         runtime?.stop()
         ws?.close()
