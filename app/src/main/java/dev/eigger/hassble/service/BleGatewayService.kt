@@ -10,7 +10,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.eigger.hassble.R
@@ -157,6 +159,12 @@ class BleGatewayService : Service() {
         // (그 상태에서 config reload가 들어오면 ws가 없어 게이트웨이가 뜨지 않는다.)
         if (intent == null) {
             LiveEventLogger.logRes(LogType.LINK, R.string.log_service_sticky_restart)
+            restoreFromSavedSettings(startId)
+            return START_STICKY
+        }
+
+        if (intent.action == ACTION_RESTART_FROM_SAVED) {
+            LiveEventLogger.log(LogType.LINK, "Full gateway restart: restoring service from saved settings")
             restoreFromSavedSettings(startId)
             return START_STICKY
         }
@@ -605,15 +613,40 @@ class BleGatewayService : Service() {
                 updateNotification()
             }
             uid == "${gid}_gateway_restart" || uid.endsWith("__${gid}_gateway_restart") || uid.endsWith("_gateway_restart") -> {
-                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart")
-                settingsJob?.cancel()
-                settingsJob = null
-                runtime?.stop()
-                runtime = null
+                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart (full service restart)")
                 ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
-                reloadConfig()
+                fullServiceRestart()
             }
         }
+    }
+
+    private fun fullServiceRestart() {
+        // A BLE runtime-only restart is not enough on some Samsung/Android builds.
+        // Reproduce the UI's "gateway stop -> start" path: destroy the foreground
+        // service (which closes WS, scanner, GATT and advertiser) and then create a
+        // fresh service instance using the persisted settings.
+        //
+        // Handler is tied to the process main looper, not this service CoroutineScope,
+        // so the delayed start survives onDestroy() cancelling the service scope.
+        val appContext = applicationContext
+        Handler(Looper.getMainLooper()).postDelayed({
+            LiveEventLogger.log(LogType.LINK, "Full gateway restart: starting foreground service")
+            val restartIntent = Intent(appContext, BleGatewayService::class.java)
+                .setAction(ACTION_RESTART_FROM_SAVED)
+            runCatching { appContext.startForegroundService(restartIntent) }
+                .onFailure { e ->
+                    LiveEventLogger.log(
+                        LogType.LINK,
+                        "[Error] Full gateway restart failed to start service: ${e.message}",
+                    )
+                }
+        }, FULL_RESTART_DELAY_MS)
+
+        // Give the gateway_running=off frame a brief chance to leave before closing WS.
+        Handler(Looper.getMainLooper()).postDelayed({
+            LiveEventLogger.log(LogType.LINK, "Full gateway restart: stopping foreground service")
+            stopSelf()
+        }, FULL_RESTART_STOP_DELAY_MS)
     }
 
     private fun declareGatewayEntities(client: HaWsClient) {
@@ -803,6 +836,9 @@ class BleGatewayService : Service() {
         const val EXTRA_GIT_TOKEN = "git_token"
         private const val EXTRA_DEVICE_ID = "device_id"
         private const val ACTION_RELOAD_CONFIG = "dev.eigger.hassble.RELOAD_CONFIG"
+        private const val ACTION_RESTART_FROM_SAVED = "dev.eigger.hassble.RESTART_FROM_SAVED"
+        private const val FULL_RESTART_STOP_DELAY_MS = 200L
+        private const val FULL_RESTART_DELAY_MS = 1400L
         private const val ACTION_REMOVE_DEVICE = "dev.eigger.hassble.REMOVE_DEVICE"
         private const val ACTION_SET_AUTO_CONNECT = "dev.eigger.hassble.SET_AUTO_CONNECT"
         private const val EXTRA_AUTO_CONNECT = "auto_connect"
