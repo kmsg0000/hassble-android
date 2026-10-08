@@ -3,7 +3,7 @@ name: ChatGPT APK Build
 on:
   push:
     branches:
-      - chatgpt/gateway-controls-1.7.5
+      - chatgpt/gateway-controls-1.7.6
 
 jobs:
   build:
@@ -30,6 +30,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: HassBle-v1.7.5-debug
+          name: HassBle-v1.7.6-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
