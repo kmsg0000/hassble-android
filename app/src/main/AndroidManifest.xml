@@ -66,6 +66,12 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <service
+            android:name=".service.GatewayProcessRestartService"
+            android:exported="false"
+            android:process=":restart"
+            android:foregroundServiceType="connectedDevice" />
+
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
