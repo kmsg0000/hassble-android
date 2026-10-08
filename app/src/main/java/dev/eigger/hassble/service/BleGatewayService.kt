@@ -613,40 +613,39 @@ class BleGatewayService : Service() {
                 updateNotification()
             }
             uid == "${gid}_gateway_restart" || uid.endsWith("__${gid}_gateway_restart") || uid.endsWith("_gateway_restart") -> {
-                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart (full service restart)")
+                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart (full process restart)")
                 ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
-                fullServiceRestart()
+                fullProcessRestart()
             }
         }
     }
 
-    private fun fullServiceRestart() {
-        // A BLE runtime-only restart is not enough on some Samsung/Android builds.
-        // Reproduce the UI's "gateway stop -> start" path: destroy the foreground
-        // service (which closes WS, scanner, GATT and advertiser) and then create a
-        // fresh service instance using the persisted settings.
-        //
-        // Handler is tied to the process main looper, not this service CoroutineScope,
-        // so the delayed start survives onDestroy() cancelling the service scope.
+    private fun fullProcessRestart() {
+        // Samsung/Android에서 BLE scanner가 service 재생성만으로 회복되지 않는 경우가 있다.
+        // 별도 프로세스의 helper FGS가 main process 종료를 기다렸다가 저장된 설정으로
+        // BleGatewayService를 새 프로세스에서 다시 시작한다.
         val appContext = applicationContext
-        Handler(Looper.getMainLooper()).postDelayed({
-            LiveEventLogger.log(LogType.LINK, "Full gateway restart: starting foreground service")
-            val restartIntent = Intent(appContext, BleGatewayService::class.java)
-                .setAction(ACTION_RESTART_FROM_SAVED)
-            runCatching { appContext.startForegroundService(restartIntent) }
-                .onFailure { e ->
-                    LiveEventLogger.log(
-                        LogType.LINK,
-                        "[Error] Full gateway restart failed to start service: ${e.message}",
-                    )
-                }
-        }, FULL_RESTART_DELAY_MS)
+        LiveEventLogger.log(LogType.LINK, "Full process restart: starting helper process")
 
-        // Give the gateway_running=off frame a brief chance to leave before closing WS.
+        val helperIntent = Intent(appContext, GatewayProcessRestartService::class.java)
+        runCatching { ContextCompat.startForegroundService(appContext, helperIntent) }
+            .onFailure { e ->
+                LiveEventLogger.log(
+                    LogType.LINK,
+                    "[Error] Full process restart helper failed to start: ${e.message}",
+                )
+                return
+            }
+
         Handler(Looper.getMainLooper()).postDelayed({
-            LiveEventLogger.log(LogType.LINK, "Full gateway restart: stopping foreground service")
+            LiveEventLogger.log(LogType.LINK, "Full process restart: stopping foreground service")
             stopSelf()
-        }, FULL_RESTART_STOP_DELAY_MS)
+        }, PROCESS_RESTART_STOP_DELAY_MS)
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            LiveEventLogger.log(LogType.LINK, "Full process restart: killing app process")
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }, PROCESS_RESTART_KILL_DELAY_MS)
     }
 
     private fun declareGatewayEntities(client: HaWsClient) {
@@ -836,9 +835,9 @@ class BleGatewayService : Service() {
         const val EXTRA_GIT_TOKEN = "git_token"
         private const val EXTRA_DEVICE_ID = "device_id"
         private const val ACTION_RELOAD_CONFIG = "dev.eigger.hassble.RELOAD_CONFIG"
-        private const val ACTION_RESTART_FROM_SAVED = "dev.eigger.hassble.RESTART_FROM_SAVED"
-        private const val FULL_RESTART_STOP_DELAY_MS = 200L
-        private const val FULL_RESTART_DELAY_MS = 1400L
+        const val ACTION_RESTART_FROM_SAVED = "dev.eigger.hassble.RESTART_FROM_SAVED"
+        private const val PROCESS_RESTART_STOP_DELAY_MS = 250L
+        private const val PROCESS_RESTART_KILL_DELAY_MS = 700L
         private const val ACTION_REMOVE_DEVICE = "dev.eigger.hassble.REMOVE_DEVICE"
         private const val ACTION_SET_AUTO_CONNECT = "dev.eigger.hassble.SET_AUTO_CONNECT"
         private const val EXTRA_AUTO_CONNECT = "auto_connect"
