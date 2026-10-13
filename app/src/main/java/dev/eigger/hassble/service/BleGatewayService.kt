@@ -13,6 +13,7 @@ import android.content.IntentFilter
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.eigger.hassble.R
@@ -86,6 +87,7 @@ class BleGatewayService : Service() {
     private var wsStateJob: Job? = null
     private var heartbeatJob: Job? = null
     private var settingsJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private var currentGitUrl: String = ""
     private var currentGitToken: String? = null
     private var currentConfig: GatewayConfig? = null
@@ -135,6 +137,7 @@ class BleGatewayService : Service() {
         _isServiceRunning.value = true
         registerNetworkCallback()
         startForeground(NOTIF_ID, buildNotification())
+        acquireGatewayWakeLock()
         LiveEventLogger.log(LogType.LINK, "Foreground service started (type=connectedDevice)")
         // ACTION_STATE_CHANGED는 시스템 보호 브로드캐스트라 NOT_EXPORTED로도 받는다.
         ContextCompat.registerReceiver(
@@ -144,6 +147,41 @@ class BleGatewayService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         BluetoothAdapterNameGuard.resetToInitial(this)
+    }
+
+    private fun acquireGatewayWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "${packageName}:BleGateway",
+        ).apply {
+            setReferenceCounted(false)
+            runCatching { acquire() }
+                .onSuccess {
+                    LiveEventLogger.log(
+                        LogType.LINK,
+                        "Partial wake lock acquired — BLE gateway kept awake while screen is off",
+                    )
+                }
+                .onFailure { e ->
+                    LiveEventLogger.log(
+                        LogType.LINK,
+                        "[Error] Failed to acquire partial wake lock: ${e.message}",
+                    )
+                }
+        }
+    }
+
+    private fun releaseGatewayWakeLock() {
+        val lock = wakeLock
+        wakeLock = null
+        if (lock?.isHeld == true) {
+            runCatching { lock.release() }
+                .onSuccess {
+                    LiveEventLogger.log(LogType.LINK, "Partial wake lock released")
+                }
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -708,6 +746,7 @@ class BleGatewayService : Service() {
         heartbeatJob?.cancel()
         runtime?.stop()
         ws?.close()
+        releaseGatewayWakeLock()
         runtime = null
         ws = null
         BleScanHealth.reset()
