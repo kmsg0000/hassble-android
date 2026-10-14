@@ -605,8 +605,8 @@ class BleRuntime(
     }
 
     /** 현재 세션을 취소 완료까지 기다린 뒤 새 세션을 띄운다. 연달아 불려도 mutex로 한 번에 하나씩. */
-    private fun relaunchScan(reason: String) {
-        scope.launch {
+    private fun relaunchScan(reason: String): Job {
+        return scope.launch {
             scanLifecycleMutex.withLock {
                 scanJob?.cancelAndJoin()
                 scanJob = null
@@ -836,7 +836,22 @@ class BleRuntime(
         when (c.action) {
             ControlAction.advertise -> {
                 when (cmd.action) {
-                    "press", "turn_on" -> startAdvertise(d)
+                    "press", "turn_on" -> {
+                        if (d.id == "mytown_parking") {
+                            // Parking receivers may stop delivering results after long idle periods.
+                            // Complete a BLE scan teardown/re-registration before advertising.
+                            // Only the parking request takes this path; door and other devices
+                            // retain their existing behaviour.
+                            scope.launch {
+                                LiveEventLogger.log(LogType.LINK, "Parking request: refreshing BLE scan before advertise")
+                                relaunchScan("parking request preflight").join()
+                                delay(750L)
+                                if (!stopped) startAdvertise(d)
+                            }
+                        } else {
+                            startAdvertise(d)
+                        }
+                    }
                     "turn_off" -> stopAdvertise(d.id)
                 }
                 return
