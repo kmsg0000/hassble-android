@@ -192,9 +192,9 @@ class BleGatewayService : Service() {
         // Queue a one-shot best-effort restart as a fallback to START_STICKY.
         // Android may block background FGS launches and force-stop cancels alarms.
         val alarm = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
-        val restartIntent = Intent(this, BleGatewayService::class.java)
-            .setAction(ACTION_RESTART_FROM_SAVED)
-        val pending = android.app.PendingIntent.getForegroundService(
+        val restartIntent = Intent(this, GatewayRecoveryReceiver::class.java)
+            .setAction(GatewayRecoveryReceiver.ACTION_RECOVER)
+        val pending = android.app.PendingIntent.getBroadcast(
             this, 1789, restartIntent,
             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
         )
