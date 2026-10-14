@@ -188,6 +188,23 @@ class BleGatewayService : Service() {
         // 최근 앱 목록에서 스와이프해도 FGS는 계속 돈다. 사용자가 "앱을 껐는데도 돈다/안 돈다"를
         // 로그로 가릴 수 있게 남긴다.
         LiveEventLogger.log(LogType.LINK, "App task removed — foreground service keeps running")
+        // Samsung firmware can kill the foreground service after the task disappears.
+        // Queue a one-shot best-effort restart as a fallback to START_STICKY.
+        // Android may block background FGS launches and force-stop cancels alarms.
+        val alarm = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+        val restartIntent = Intent(this, BleGatewayService::class.java)
+            .setAction(ACTION_RESTART_FROM_SAVED)
+        val pending = android.app.PendingIntent.getForegroundService(
+            this, 1789, restartIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        runCatching {
+            alarm?.setAndAllowWhileIdle(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 30_000L,
+                pending,
+            )
+        }.onFailure { LiveEventLogger.log(LogType.LINK, "Task removal fallback alarm failed: ${it.message}") }
         super.onTaskRemoved(rootIntent)
     }
 
