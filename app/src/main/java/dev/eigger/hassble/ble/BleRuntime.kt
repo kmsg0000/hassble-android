@@ -67,9 +67,12 @@ class BleRuntime(
     private val onAdvertisingChanged: (String, Boolean) -> Unit = { _, _ -> },
     /** 처리 오류 로그가 남을 때(새 종류 첫 발생·반복 N회마다). 서비스가 알림의 오류 건수를 갱신한다. */
     private val onPipelineError: () -> Unit = {},
+    private val onParkingResponseTimeout: () -> Unit = {},
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private var scanJob: Job? = null
+    private var parkingTimeoutJob: Job? = null
+    private var parkingRequestEpoch = 0L
     private val deviceConnectionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private lateinit var config: GatewayConfig
@@ -722,6 +725,11 @@ class BleRuntime(
 
         when (d.source) {
             Source.advertisement -> {
+                if (d.id == "mytown_parking") {
+                    parkingRequestEpoch++
+                    parkingTimeoutJob?.cancel()
+                    parkingTimeoutJob = null
+                }
                 val mac = r.macAddress ?: return
                 if (d.advertise?.stopOnResponse == true && advertiser?.isAdvertising(d.id) == true) {
                     advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)
@@ -838,6 +846,7 @@ class BleRuntime(
                 when (cmd.action) {
                     "press", "turn_on" -> {
                         if (d.id == "mytown_parking") {
+                            scheduleParkingResponseCheck()
                             // Parking receivers may stop delivering results after long idle periods.
                             // Complete a BLE scan teardown/re-registration before advertising.
                             // Only the parking request takes this path; door and other devices
@@ -921,6 +930,18 @@ class BleRuntime(
         onLinkStatus(DeviceLinkStatus(deviceId, DeviceLinkState.Disconnected, mac))
     }
 
+    private fun scheduleParkingResponseCheck() {
+        val epoch = ++parkingRequestEpoch
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = scope.launch {
+            delay(12_000L)
+            if (!stopped && epoch == parkingRequestEpoch) {
+                LiveEventLogger.log(LogType.LINK, "Parking response missing after 12s — requesting one full gateway recovery")
+                onParkingResponseTimeout()
+            }
+        }
+    }
+
     private fun startAdvertise(d: DeviceConfig) {
         val advConfig = d.advertise ?: return
         if (ConfigValidator.hasDeviceError(validationIssues, d.id)) return
@@ -982,6 +1003,8 @@ class BleRuntime(
         eventJob = null
         // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.
         stopped = true
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = null
         scanJob?.cancel()
         scanJob = null
         presenceJob?.cancel()
