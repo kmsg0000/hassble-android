@@ -934,9 +934,9 @@ class BleRuntime(
         val epoch = ++parkingRequestEpoch
         parkingTimeoutJob?.cancel()
         parkingTimeoutJob = scope.launch {
-            delay(12_000L)
+            delay(5_000L)
             if (!stopped && epoch == parkingRequestEpoch) {
-                LiveEventLogger.log(LogType.LINK, "Parking response missing after 12s — requesting one full gateway recovery")
+                LiveEventLogger.log(LogType.LINK, "Parking response missing after 5s — requesting one full gateway recovery")
                 onParkingResponseTimeout()
             }
         }
