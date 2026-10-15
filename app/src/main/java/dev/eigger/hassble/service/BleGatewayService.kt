@@ -580,8 +580,28 @@ class BleGatewayService : Service() {
                         _advertisingDeviceIds.value = if (isAdv) cur + id else cur - id
                     },
                     onPipelineError = { runCatching { updateNotification() } },
+                    onParkingResponseTimeout = {
+                        val prefs = getSharedPreferences("parking_recovery", Context.MODE_PRIVATE)
+                        if (!prefs.getBoolean("retry_pending", false)) {
+                            prefs.edit().putBoolean("retry_pending", true).putLong("retry_at", System.currentTimeMillis()).apply()
+                            LiveEventLogger.log(LogType.LINK, "Parking response timed out — restarting gateway process for one retry")
+                            fullProcessRestart()
+                        }
+                    },
                 ).also { it.start() }
                 publishGatewayStates(client)
+                val retryPrefs = getSharedPreferences("parking_recovery", Context.MODE_PRIVATE)
+                if (retryPrefs.getBoolean("retry_pending", false)) {
+                    val age = System.currentTimeMillis() - retryPrefs.getLong("retry_at", 0L)
+                    retryPrefs.edit().putBoolean("retry_pending", false).apply()
+                    if (age in 0..120_000L) {
+                        scope.launch {
+                            delay(5_000L)
+                            LiveEventLogger.log(LogType.LINK, "Parking full recovery finished — one request retry")
+                            runtime?.triggerAdvertise("mytown_parking")
+                        }
+                    }
+                }
             }
 
             settingsJob = scope.launch {
