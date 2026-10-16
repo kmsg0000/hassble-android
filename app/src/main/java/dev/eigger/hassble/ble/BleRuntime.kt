@@ -67,9 +67,15 @@ class BleRuntime(
     private val onAdvertisingChanged: (String, Boolean) -> Unit = { _, _ -> },
     /** 처리 오류 로그가 남을 때(새 종류 첫 발생·반복 N회마다). 서비스가 알림의 오류 건수를 갱신한다. */
     private val onPipelineError: () -> Unit = {},
+    private val onParkingResponseTimeout: () -> Unit = {},
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private var scanJob: Job? = null
+    private var parkingTimeoutJob: Job? = null
+    private var parkingRequestEpoch = 0L
+    @Volatile private var parkingDiagnosticUntilMs = 0L
+    private var parkingDiagnosticsRestoreJob: Job? = null
+    private var parkingRetryMode = false
     private val deviceConnectionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private lateinit var config: GatewayConfig
@@ -582,7 +588,7 @@ class BleRuntime(
     private fun launchScan() {
         val adv = config.devices.filter { it.source == Source.advertisement }
         if (adv.isNotEmpty()) {
-            val job = scanner.scan(adv, scanMode, unfilteredScan).onEach(::safeOnReading).launchIn(scope)
+            val job = scanner.scan(adv, scanMode, unfilteredScan || System.currentTimeMillis() < parkingDiagnosticUntilMs).onEach(::safeOnReading).launchIn(scope)
             scanJob = job
             watchCollector(job, "BLE scan collector", relaunchOnNormalEnd = true) {
                 // 교체된 옛 세션이면 건드리지 않는다(새 세션은 이미 떠 있다).
@@ -605,8 +611,8 @@ class BleRuntime(
     }
 
     /** 현재 세션을 취소 완료까지 기다린 뒤 새 세션을 띄운다. 연달아 불려도 mutex로 한 번에 하나씩. */
-    private fun relaunchScan(reason: String) {
-        scope.launch {
+    private fun relaunchScan(reason: String): Job {
+        return scope.launch {
             scanLifecycleMutex.withLock {
                 scanJob?.cancelAndJoin()
                 scanJob = null
@@ -722,6 +728,12 @@ class BleRuntime(
 
         when (d.source) {
             Source.advertisement -> {
+                if (d.id == "mytown_parking") {
+                    parkingRequestEpoch++
+                    parkingTimeoutJob?.cancel()
+                    parkingTimeoutJob = null
+                    LiveEventLogger.log(LogType.LINK, "Parking matched BLE advertisement — response received")
+                }
                 val mac = r.macAddress ?: return
                 if (d.advertise?.stopOnResponse == true && advertiser?.isAdvertising(d.id) == true) {
                     advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)
@@ -836,7 +848,23 @@ class BleRuntime(
         when (c.action) {
             ControlAction.advertise -> {
                 when (cmd.action) {
-                    "press", "turn_on" -> startAdvertise(d)
+                    "press", "turn_on" -> {
+                        if (d.id == "mytown_parking") {
+                            parkingRetryMode = false
+                            // Parking receivers may stop delivering results after long idle periods.
+                            // Complete a BLE scan teardown/re-registration before advertising.
+                            // Only the parking request takes this path; door and other devices
+                            // retain their existing behaviour.
+                            scope.launch {
+                                LiveEventLogger.log(LogType.LINK, "Parking request: refreshing BLE scan before advertise")
+                                beginParkingDiagnostics()
+                                delay(750L)
+                                if (!stopped) startAdvertise(d)
+                            }
+                        } else {
+                            startAdvertise(d)
+                        }
+                    }
                     "turn_off" -> stopAdvertise(d.id)
                 }
                 return
@@ -906,6 +934,35 @@ class BleRuntime(
         onLinkStatus(DeviceLinkStatus(deviceId, DeviceLinkState.Disconnected, mac))
     }
 
+    private suspend fun beginParkingDiagnostics() {
+        parkingDiagnosticUntilMs = System.currentTimeMillis() + 25_000L
+        LiveEventLogger.log(LogType.LINK, "Parking diagnostics: unfiltered BLE scan enabled for 25s")
+        relaunchScan("parking unfiltered diagnostics").join()
+        parkingDiagnosticsRestoreJob?.cancel()
+        parkingDiagnosticsRestoreJob = scope.launch {
+            delay(25_000L)
+            parkingDiagnosticUntilMs = 0L
+            LiveEventLogger.log(LogType.LINK, "Parking diagnostics complete — restoring configured scan filters")
+            relaunchScan("parking diagnostics complete").join()
+        }
+    }
+
+    private fun scheduleParkingResponseCheck() {
+        val epoch = ++parkingRequestEpoch
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = scope.launch {
+            delay(5_000L)
+            if (!stopped && epoch == parkingRequestEpoch) {
+                if (parkingRetryMode) {
+                    LiveEventLogger.log(LogType.LINK, "Parking recovery retry also failed: no matching BLE response after 5s; no further restart")
+                } else {
+                    LiveEventLogger.log(LogType.LINK, "Parking response missing after 5s — requesting one full gateway recovery")
+                    onParkingResponseTimeout()
+                }
+            }
+        }
+    }
+
     private fun startAdvertise(d: DeviceConfig) {
         val advConfig = d.advertise ?: return
         if (ConfigValidator.hasDeviceError(validationIssues, d.id)) return
@@ -933,6 +990,7 @@ class BleRuntime(
         ) ?: false
         if (started) {
             publishAdvertisingState(d, true)
+            if (d.id == "mytown_parking") scheduleParkingResponseCheck()
         }
     }
 
@@ -951,7 +1009,14 @@ class BleRuntime(
     fun triggerAdvertise(deviceId: String) {
         if (!::config.isInitialized) return
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
-        startAdvertise(d)
+        if (deviceId == "mytown_parking") {
+            parkingRetryMode = true
+            scope.launch {
+                beginParkingDiagnostics()
+                delay(750L)
+                if (!stopped) startAdvertise(d)
+            }
+        } else startAdvertise(d)
     }
 
     /** 게이트웨이 실행 중 특정 기기의 BLE 광고 송신을 중단. */
@@ -967,6 +1032,10 @@ class BleRuntime(
         eventJob = null
         // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.
         stopped = true
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = null
+        parkingDiagnosticsRestoreJob?.cancel()
+        parkingDiagnosticUntilMs = 0L
         scanJob?.cancel()
         scanJob = null
         presenceJob?.cancel()
