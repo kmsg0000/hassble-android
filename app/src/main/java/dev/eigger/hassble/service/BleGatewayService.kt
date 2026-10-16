@@ -188,6 +188,23 @@ class BleGatewayService : Service() {
         // 최근 앱 목록에서 스와이프해도 FGS는 계속 돈다. 사용자가 "앱을 껐는데도 돈다/안 돈다"를
         // 로그로 가릴 수 있게 남긴다.
         LiveEventLogger.log(LogType.LINK, "App task removed — foreground service keeps running")
+        // Samsung firmware can kill the foreground service after the task disappears.
+        // Queue a one-shot best-effort restart as a fallback to START_STICKY.
+        // Android may block background FGS launches and force-stop cancels alarms.
+        val alarm = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+        val restartIntent = Intent(this, GatewayRecoveryReceiver::class.java)
+            .setAction(GatewayRecoveryReceiver.ACTION_RECOVER)
+        val pending = android.app.PendingIntent.getBroadcast(
+            this, 1789, restartIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        runCatching {
+            alarm?.setAndAllowWhileIdle(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 30_000L,
+                pending,
+            )
+        }.onFailure { LiveEventLogger.log(LogType.LINK, "Task removal fallback alarm failed: ${it.message}") }
         super.onTaskRemoved(rootIntent)
     }
 
@@ -563,8 +580,12 @@ class BleGatewayService : Service() {
                         _advertisingDeviceIds.value = if (isAdv) cur + id else cur - id
                     },
                     onPipelineError = { runCatching { updateNotification() } },
+                    onParkingResponseTimeout = {
+                        scope.launch { recoverParkingWithManualStopStart() }
+                    },
                 ).also { it.start() }
                 publishGatewayStates(client)
+
             }
 
             settingsJob = scope.launch {
@@ -655,6 +676,50 @@ class BleGatewayService : Service() {
                 ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
                 fullProcessRestart()
             }
+        }
+    }
+
+    // Same runtime paths as HA Gateway Stop and Gateway Start (not the helper-process Restart).
+    // A time-bounded latch avoids rapid retries and recursive restart storms.
+    private var parkingRecoveryInProgress = false
+    private var lastParkingRecoveryAt = 0L
+
+    private suspend fun recoverParkingWithManualStopStart() {
+        val now = System.currentTimeMillis()
+        if (parkingRecoveryInProgress || now - lastParkingRecoveryAt < 30_000L) {
+            LiveEventLogger.log(LogType.LINK, "Parking manual-equivalent recovery skipped: busy/cooldown")
+            return
+        }
+        parkingRecoveryInProgress = true
+        lastParkingRecoveryAt = now
+        try {
+            LiveEventLogger.log(LogType.LINK, "Parking recovery step 1/3: Gateway Stop (same cleanup as manual Stop)")
+            settingsJob?.cancel()
+            settingsJob = null
+            runtime?.stop()
+            runtime = null
+            ws?.sendStates(listOf("${gatewayId()}_gateway_running" to "off"))
+            updateNotification()
+            delay(700L)
+            LiveEventLogger.log(LogType.LINK, "Parking recovery step 2/3: Gateway Start (rebuild BLE runtime)")
+            reloadConfig()
+            // Config reload is asynchronous; do not transmit until a new runtime is available.
+            var ready = false
+            for (attempt in 1..30) {
+                if (runtime != null) { ready = true; break }
+                delay(100L)
+            }
+            if (!ready) {
+                LiveEventLogger.log(LogType.LINK, "[Error] Parking recovery: runtime not ready after restart")
+                return
+            }
+            delay(300L)
+            LiveEventLogger.log(LogType.LINK, "Parking recovery step 3/3: re-request parking location")
+            runtime?.triggerAdvertise("mytown_parking")
+        } catch (e: Exception) {
+            LiveEventLogger.log(LogType.LINK, "[Error] Parking stop/start recovery: ${e.message}")
+        } finally {
+            parkingRecoveryInProgress = false
         }
     }
 
