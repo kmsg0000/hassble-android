@@ -705,8 +705,8 @@ class BleGatewayService : Service() {
             reloadConfig()
             // Config reload is asynchronous; do not transmit until a new runtime is available.
             var ready = false
-            repeat(30) {
-                if (runtime != null) { ready = true; return@repeat }
+            for (attempt in 1..30) {
+                if (runtime != null) { ready = true; break }
                 delay(100L)
             }
             if (!ready) {
