@@ -19,6 +19,8 @@ import androidx.core.content.ContextCompat
  */
 class GatewayProcessRestartService : Service() {
 
+    private var manualStopStart = false
+
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
@@ -45,7 +47,13 @@ class GatewayProcessRestartService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        LiveEventLogger.log(LogType.LINK, "Restart helper: waiting for main process to exit")
+        manualStopStart = intent?.action == ACTION_MANUAL_STOP_START
+        if (manualStopStart) {
+            LiveEventLogger.log(LogType.LINK, "Parking helper: invoking actual BleGatewayService.stop(context)")
+            BleGatewayService.stop(this)
+        } else {
+            LiveEventLogger.log(LogType.LINK, "Restart helper: waiting for main process to exit")
+        }
 
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({
@@ -62,7 +70,7 @@ class GatewayProcessRestartService : Service() {
                 }
 
             stopSelf()
-        }, RESTART_DELAY_MS)
+        }, if (manualStopStart) 1_500L else RESTART_DELAY_MS)
 
         return START_NOT_STICKY
     }
@@ -75,6 +83,7 @@ class GatewayProcessRestartService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        const val ACTION_MANUAL_STOP_START = "dev.eigger.hassble.PARKING_MANUAL_STOP_START"
         private const val CHANNEL_ID = "ble_gateway_restart"
         private const val NOTIF_ID = 3
         private const val RESTART_DELAY_MS = 2200L
