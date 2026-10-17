@@ -581,7 +581,21 @@ class BleGatewayService : Service() {
                     },
                     onPipelineError = { runCatching { updateNotification() } },
                     onParkingResponseTimeout = {
-                        scope.launch { recoverParkingWithManualStopStart() }
+                        // Real Android Service stop/start, matching the UI buttons.
+                        val appContext = applicationContext
+                        val now = System.currentTimeMillis()
+                        val p = appContext.getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
+                        val last = p.getLong("last_at", 0L)
+                        if (now - last >= 30_000L) {
+                            p.edit().putLong("last_at", now).apply()
+                            LiveEventLogger.log(LogType.LINK, "Parking recovery: requesting real Service Stop -> Start")
+                            val intent = Intent(appContext, GatewayProcessRestartService::class.java)
+                                .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
+                            runCatching { ContextCompat.startForegroundService(appContext, intent) }
+                                .onFailure { LiveEventLogger.log(LogType.LINK, "[Error] Parking service helper: ${it.message}") }
+                        } else {
+                            LiveEventLogger.log(LogType.LINK, "Parking recovery skipped: cooldown 30s")
+                        }
                     },
                 ).also { it.start() }
                 publishGatewayStates(client)
@@ -676,50 +690,6 @@ class BleGatewayService : Service() {
                 ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
                 fullProcessRestart()
             }
-        }
-    }
-
-    // Same runtime paths as HA Gateway Stop and Gateway Start (not the helper-process Restart).
-    // A time-bounded latch avoids rapid retries and recursive restart storms.
-    private var parkingRecoveryInProgress = false
-    private var lastParkingRecoveryAt = 0L
-
-    private suspend fun recoverParkingWithManualStopStart() {
-        val now = System.currentTimeMillis()
-        if (parkingRecoveryInProgress || now - lastParkingRecoveryAt < 30_000L) {
-            LiveEventLogger.log(LogType.LINK, "Parking manual-equivalent recovery skipped: busy/cooldown")
-            return
-        }
-        parkingRecoveryInProgress = true
-        lastParkingRecoveryAt = now
-        try {
-            LiveEventLogger.log(LogType.LINK, "Parking recovery step 1/3: Gateway Stop (same cleanup as manual Stop)")
-            settingsJob?.cancel()
-            settingsJob = null
-            runtime?.stop()
-            runtime = null
-            ws?.sendStates(listOf("${gatewayId()}_gateway_running" to "off"))
-            updateNotification()
-            delay(700L)
-            LiveEventLogger.log(LogType.LINK, "Parking recovery step 2/3: Gateway Start (rebuild BLE runtime)")
-            reloadConfig()
-            // Config reload is asynchronous; do not transmit until a new runtime is available.
-            var ready = false
-            for (attempt in 1..30) {
-                if (runtime != null) { ready = true; break }
-                delay(100L)
-            }
-            if (!ready) {
-                LiveEventLogger.log(LogType.LINK, "[Error] Parking recovery: runtime not ready after restart")
-                return
-            }
-            delay(300L)
-            LiveEventLogger.log(LogType.LINK, "Parking recovery step 3/3: re-request parking location")
-            runtime?.triggerAdvertise("mytown_parking")
-        } catch (e: Exception) {
-            LiveEventLogger.log(LogType.LINK, "[Error] Parking stop/start recovery: ${e.message}")
-        } finally {
-            parkingRecoveryInProgress = false
         }
     }
 
