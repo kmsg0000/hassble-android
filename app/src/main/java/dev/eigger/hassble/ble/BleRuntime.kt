@@ -852,9 +852,10 @@ class BleRuntime(
                             // Only the parking request takes this path; door and other devices
                             // retain their existing behaviour.
                             scope.launch {
-                                LiveEventLogger.log(LogType.LINK, "Parking request: refreshing BLE scan before advertise")
-                                relaunchScan("parking request preflight").join()
-                                delay(750L)
+                                // Reuse the already running filtered scanner: frequent start/stop
+                                // can trigger Android scan throttling especially with screen locked.
+                                LiveEventLogger.log(LogType.LINK, "Parking request: using active BLE scan")
+                                if (scanJob?.isActive != true) relaunchScan("parking scanner inactive").join()
                                 if (!stopped) startAdvertise(d)
                             }
                         } else {
