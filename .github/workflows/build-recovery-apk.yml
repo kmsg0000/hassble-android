@@ -2,7 +2,7 @@ name: Build HassBle recovery APK
 on:
   push:
     branches:
-      - fix/actual-service-stop-start-1.8.4
+      - fix/background-boot-1.8.5
   pull_request:
     branches:
       - chatgpt/gateway-controls-1.7.7
@@ -23,6 +23,6 @@ jobs:
           ./gradlew assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: hassble-1.8.4-debug-apk
+          name: hassble-1.8.5-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
