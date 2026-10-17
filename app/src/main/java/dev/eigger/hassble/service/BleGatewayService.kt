@@ -188,6 +188,23 @@ class BleGatewayService : Service() {
         // 최근 앱 목록에서 스와이프해도 FGS는 계속 돈다. 사용자가 "앱을 껐는데도 돈다/안 돈다"를
         // 로그로 가릴 수 있게 남긴다.
         LiveEventLogger.log(LogType.LINK, "App task removed — foreground service keeps running")
+        // Samsung firmware can kill the foreground service after the task disappears.
+        // Queue a one-shot best-effort restart as a fallback to START_STICKY.
+        // Android may block background FGS launches and force-stop cancels alarms.
+        val alarm = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+        val restartIntent = Intent(this, GatewayRecoveryReceiver::class.java)
+            .setAction(GatewayRecoveryReceiver.ACTION_RECOVER)
+        val pending = android.app.PendingIntent.getBroadcast(
+            this, 1789, restartIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        runCatching {
+            alarm?.setAndAllowWhileIdle(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 30_000L,
+                pending,
+            )
+        }.onFailure { LiveEventLogger.log(LogType.LINK, "Task removal fallback alarm failed: ${it.message}") }
         super.onTaskRemoved(rootIntent)
     }
 
@@ -563,8 +580,26 @@ class BleGatewayService : Service() {
                         _advertisingDeviceIds.value = if (isAdv) cur + id else cur - id
                     },
                     onPipelineError = { runCatching { updateNotification() } },
+                    onParkingResponseTimeout = {
+                        // Real Android Service stop/start, matching the UI buttons.
+                        val appContext = applicationContext
+                        val now = System.currentTimeMillis()
+                        val p = appContext.getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
+                        val last = p.getLong("last_at", 0L)
+                        if (now - last >= 30_000L) {
+                            p.edit().putLong("last_at", now).apply()
+                            LiveEventLogger.log(LogType.LINK, "Parking recovery: requesting real Service Stop -> Start")
+                            val intent = Intent(appContext, GatewayProcessRestartService::class.java)
+                                .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
+                            runCatching { ContextCompat.startForegroundService(appContext, intent) }
+                                .onFailure { LiveEventLogger.log(LogType.LINK, "[Error] Parking service helper: ${it.message}") }
+                        } else {
+                            LiveEventLogger.log(LogType.LINK, "Parking recovery skipped: cooldown 30s")
+                        }
+                    },
                 ).also { it.start() }
                 publishGatewayStates(client)
+
             }
 
             settingsJob = scope.launch {
