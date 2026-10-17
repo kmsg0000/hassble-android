@@ -383,6 +383,16 @@ class BleGatewayService : Service() {
                 client.bridgeConnected.collect { guarded("bridge (re)connect handling") {
                     declareGatewayEntities(client)
                     publishGatewayStates(client)
+                // Retry parking request once after a genuine Android service stop/start.
+                val recoveryPrefs = getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
+                if (recoveryPrefs.getBoolean("retry_pending", false)) {
+                    recoveryPrefs.edit().putBoolean("retry_pending", false).apply()
+                    scope.launch {
+                        delay(700L)
+                        LiveEventLogger.log(LogType.LINK, "Parking service restart complete: retrying location once")
+                        runtime?.triggerAdvertise("mytown_parking")
+                    }
+                }
                     val repository = HassSettingsRepository(this@BleGatewayService)
                     val pendingFromStore = repository.consumePendingHaRemovals()
                     // 선언 내용이 바뀐 device의 HA 엔티티를 먼저 제거 후 재선언
@@ -587,7 +597,7 @@ class BleGatewayService : Service() {
                         val p = appContext.getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
                         val last = p.getLong("last_at", 0L)
                         if (now - last >= 30_000L) {
-                            p.edit().putLong("last_at", now).apply()
+                            p.edit().putLong("last_at", now).putBoolean("retry_pending", true).apply()
                             LiveEventLogger.log(LogType.LINK, "Parking recovery: requesting real Service Stop -> Start")
                             val intent = Intent(appContext, GatewayProcessRestartService::class.java)
                                 .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
