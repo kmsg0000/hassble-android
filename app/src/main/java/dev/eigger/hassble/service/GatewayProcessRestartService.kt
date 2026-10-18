@@ -70,7 +70,7 @@ class GatewayProcessRestartService : Service() {
                 }
 
             stopSelf()
-        }, if (manualStopStart) 1_500L else RESTART_DELAY_MS)
+        }, if (manualStopStart) 3_000L else RESTART_DELAY_MS)
 
         return START_NOT_STICKY
     }
