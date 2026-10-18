@@ -73,6 +73,11 @@
             android:foregroundServiceType="connectedDevice" />
 
         <receiver
+            android:name=".service.GatewayRecoveryReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
             android:exported="true">
