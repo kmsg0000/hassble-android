@@ -696,9 +696,11 @@ class BleGatewayService : Service() {
                 updateNotification()
             }
             uid == "${gid}_gateway_restart" || uid.endsWith("__${gid}_gateway_restart") || uid.endsWith("_gateway_restart") -> {
-                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart (full process restart)")
-                ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
-                fullProcessRestart()
+                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart -> actual UI Stop/Start service cycle")
+                val restartIntent = Intent(applicationContext, GatewayProcessRestartService::class.java)
+                    .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
+                runCatching { ContextCompat.startForegroundService(applicationContext, restartIntent) }
+                    .onFailure { LiveEventLogger.log(LogType.LINK, "[Error] Manual service cycle failed: ${it.message}") }
             }
         }
     }
