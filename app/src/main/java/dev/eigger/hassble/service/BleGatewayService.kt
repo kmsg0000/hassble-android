@@ -116,6 +116,8 @@ class BleGatewayService : Service() {
 
     // Bluetooth OFF→ON은 스캔 세션을 콜백 없이 죽인다. ON에서 스캐너를 바로 다시 세운다.
     // OFF에서는 건드리지 않는다 — 스캐너가 ON을 기다리는 루프에 스스로 들어가고, 어차피 ON에서 갈아 끼운다.
+    private val carnivalReceiver = CarnivalBluetoothReceiver()
+
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
@@ -146,6 +148,12 @@ class BleGatewayService : Service() {
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        // Keep classic Bluetooth disconnect observation alive while screen is off.
+        val carFilter = IntentFilter().apply {
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(this, carnivalReceiver, carFilter, ContextCompat.RECEIVER_EXPORTED)
         BluetoothAdapterNameGuard.resetToInitial(this)
     }
 
@@ -391,6 +399,11 @@ class BleGatewayService : Service() {
                         delay(700L)
                         LiveEventLogger.log(LogType.LINK, "Parking service restart complete: retrying location once")
                         runtime?.triggerAdvertise("mytown_parking")
+                        if (recoveryPrefs.getBoolean("carnival_second_request", false)) {
+                            recoveryPrefs.edit().putBoolean("carnival_second_request", false).apply()
+                            delay(4_000L)
+                            runtime?.triggerAdvertise("mytown_parking")
+                        }
                     }
                 }
                     val repository = HassSettingsRepository(this@BleGatewayService)
@@ -787,6 +800,7 @@ class BleGatewayService : Service() {
         LiveEventLogger.log(LogType.LINK, "Foreground service stopping")
         unregisterNetworkCallback()
         runCatching { unregisterReceiver(bluetoothStateReceiver) }
+        runCatching { unregisterReceiver(carnivalReceiver) }
         configJob?.cancel()
         settingsJob?.cancel()
         wsStateJob?.cancel()
