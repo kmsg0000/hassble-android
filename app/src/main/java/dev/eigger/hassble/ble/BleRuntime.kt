@@ -988,6 +988,7 @@ class BleRuntime(
     fun triggerAdvertise(deviceId: String) {
         if (!::config.isInitialized) return
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
+        if (deviceId == "mytown_parking") ParkingBleDiagnostics.start()
         startAdvertise(d)
     }
 
