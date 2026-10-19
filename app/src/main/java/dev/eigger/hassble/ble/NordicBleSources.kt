@@ -484,8 +484,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                 match.manufacturerId != null -> {
                     // Empty data bytes (ByteArray(0)) is ambiguous: some BLE chips interpret it
                     // as "payload must be empty", silently dropping all non-empty payloads.
-                    // Use manufacturer_hex_prefix bytes as the filter when available — this gives
-                    // a reliable, non-empty hardware filter that also enables background scanning.
+                    // Keep only the first manufacturer prefix byte in the hardware filter.
+                    // The software AdvertisementMatcher still checks the full prefix.
+                    // Filtering the full variable payload in hardware can discard parking responses.
                     val prefixBytes = match.manufacturerHexPrefix
                         ?.chunked(2)
                         ?.mapNotNull { it.toIntOrNull(16)?.toByte() }
@@ -494,7 +495,7 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                     filters.add(BleScanFilter(
                         manufacturerData = FilteredManufacturerData(
                             id = match.manufacturerId,
-                            data = DataByteArray(prefixBytes ?: ByteArray(0))
+                            data = DataByteArray(prefixBytes?.take(1)?.toByteArray() ?: ByteArray(0))
                         )
                     ))
                 }
