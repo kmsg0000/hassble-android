@@ -988,7 +988,22 @@ class BleRuntime(
     fun triggerAdvertise(deviceId: String) {
         if (!::config.isInitialized) return
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
-        if (deviceId == "mytown_parking") ParkingBleDiagnostics.start()
+        if (deviceId == "mytown_parking") {
+            ParkingBleDiagnostics.start()
+            // Refresh a stale native scanner before advertising, not while the response is arriving.
+            // Avoid resetting a just-created scanner (e.g. after the Carnival service restart).
+            val lastScanStart = BleScanHealth.state.value.sessionStartMs ?: 0L
+            if (System.currentTimeMillis() - lastScanStart > 20_000L) {
+                scope.launch {
+                    LiveEventLogger.log(LogType.LINK, "Parking request: refreshing native scan before BLE advertise")
+                    val scanRestart = relaunchScan("parking preflight refresh")
+                    scanRestart.join()
+                    delay(350L)
+                    if (!stopped) startAdvertise(d)
+                }
+                return
+            }
+        }
         startAdvertise(d)
     }
 
