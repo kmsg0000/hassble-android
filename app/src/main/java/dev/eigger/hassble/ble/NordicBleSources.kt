@@ -130,9 +130,13 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
         }
         val scanSettings = BleScannerSettings(
             scanMode = nativeScanMode,
-            legacy = true,
+            // Include legacy AND extended BLE advertisements on Android 17.
+            legacy = false,
         )
         val scanFilters = if (unfiltered) emptyList() else buildScanFilters(devices)
+        val screen = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        LiveEventLogger.log(LogType.LINK,
+            "BLE scan screen=${if (screen.isInteractive) "interactive" else "locked/off"}, native filters=${scanFilters.size}, legacy=false")
         LiveEventLogger.log(LogType.LINK, "BLE scan mode: ${scanMode.label}, filters: ${scanFilters.size}")
         if (scanFilters.isEmpty()) {
             // Android 8.1+는 필터 없는 스캔에 화면이 꺼진 동안 결과를 주지 않는다.
@@ -180,6 +184,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                         scanner.scan(filters = scanFilters, settings = scanSettings).collect { result ->
                             val now = System.currentTimeMillis()
                             lastResultMs.set(now)
+                            if (!gotResultThisSession && !screen.isInteractive) {
+                                LiveEventLogger.log(LogType.LINK, "BLE scan: native ScanResult received while screen locked")
+                            }
                             gotResultThisSession = true
                             BleScanHealth.onResult(now)
                             val deviceName = result.device.name ?: ""
