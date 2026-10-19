@@ -56,6 +56,23 @@ private fun uuidFrom(str: String): UUID {
 }
 
 private const val TAG = "HassBleSources"
+
+/** A bounded, short diagnostic window after an explicit parking request. */
+object ParkingBleDiagnostics {
+    @Volatile private var untilMs = 0L
+    private val logged = java.util.concurrent.atomic.AtomicInteger(0)
+    fun start() {
+        logged.set(0)
+        untilMs = System.currentTimeMillis() + 25_000L
+        LiveEventLogger.log(LogType.LINK, "Parking BLE diagnostics: 25s capture armed (native hardware filters still apply)")
+    }
+    fun active(): Boolean = System.currentTimeMillis() < untilMs
+    fun log(message: String) {
+        if (active() && logged.getAndIncrement() < 30) {
+            LiveEventLogger.log(LogType.LINK, "Parking BLE diagnostics: $message")
+        }
+    }
+}
 /** 권한/Bluetooth ON을 기다리는 동안의 재확인 주기. */
 private const val PREREQ_POLL_MS = 2_000L
 
@@ -224,6 +241,11 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                             val serviceData = serviceDataCache[deviceAddress] ?: scanRecord?.serviceData ?: emptyMap()
                             val advertisedServiceUuids = serviceUuidsCache[deviceAddress] ?: scanRecord?.serviceUuids.orEmpty()
                             val rawBytes = scanRecord?.bytes
+                            if (ParkingBleDiagnostics.active()) {
+                                val ids = (0 until (manufacturerData?.size() ?: 0)).map { manufacturerData!!.keyAt(it) }
+                                val svc = serviceData.keys.map { getShortUuid(it.uuid) }
+                                ParkingBleDiagnostics.log("raw callback addr=$deviceAddress, mfrIds=$ids, svc=$svc, locked=${!screen.isInteractive}")
+                            }
         
                             // LiveEventLogger.log()는 includeAdvLogs가 꺼져 있으면(기본값) ADV 항목을
                             // 그냥 버린다. 그런데 이 hex 포맷팅 자체가 스캔 결과마다(주행 중엔 초당
@@ -280,6 +302,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                                     if (match.manufacturerId != null || match.serviceDataUuid != null) {
                                         Log.d(TAG, "  NO MATCH profile=${d.id} mfrId=${match.manufacturerId} svcUuid=${match.serviceDataUuid}")
                                     }
+                                    if (d.id == "mytown_parking") {
+                                        ParkingBleDiagnostics.log("mytown_parking software matcher rejected addr=$deviceAddress")
+                                    }
                                     continue
                                 }
         
@@ -296,6 +321,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                                     SourceField.service_data -> serviceDataHex
                                     SourceField.manufacturer_data -> manufacturerHex
                                     SourceField.raw -> fullScanHex
+                                }
+                                if (d.id == "mytown_parking") {
+                                    ParkingBleDiagnostics.log("mytown_parking MATCH addr=$deviceAddress, source=$primaryField, payload=${primaryHex?.take(32) ?: "null"}")
                                 }
                                 if (primaryHex.isNullOrBlank()) {
                                     Log.d(TAG, "  MATCHED ${d.id} addr=$deviceAddress but $primaryField is null (mfr=$manufacturerHex)")
