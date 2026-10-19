@@ -184,11 +184,11 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                         scanner.scan(filters = scanFilters, settings = scanSettings).collect { result ->
                             val now = System.currentTimeMillis()
                             lastResultMs.set(now)
-                            gotResultThisSession = true
-                            BleScanHealth.onResult(now)
-                            if (!screen.isInteractive && !gotResultThisSession) {
+                            if (!gotResultThisSession && !screen.isInteractive) {
                                 LiveEventLogger.log(LogType.LINK, "BLE scan: native ScanResult received while screen locked")
                             }
+                            gotResultThisSession = true
+                            BleScanHealth.onResult(now)
                             val deviceName = result.device.name ?: ""
                             val deviceAddress = result.device.address
                             val scanRecord = result.data?.scanRecord
