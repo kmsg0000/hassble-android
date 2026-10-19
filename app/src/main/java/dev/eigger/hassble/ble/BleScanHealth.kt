@@ -80,7 +80,7 @@ object BleScanHealth {
  */
 object ScanWatchdogPolicy {
     /** 이 시간 동안 ScanResult가 한 건도 없으면 세션을 재시작한다. */
-    const val IDLE_LIMIT_MS = 60_000L
+    const val IDLE_LIMIT_MS = 5 * 60_000L
     /** 진짜로 주변에 광고가 없는 곳(심야 주차장 등)에서 무한 재시작하지 않도록 유휴 재시작은 여기까지 늘린다. */
     const val IDLE_LIMIT_MAX_MS = 10 * 60_000L
     /** AOSP 30분 타임아웃보다 먼저 세션을 갈아 끼운다. */
@@ -92,7 +92,7 @@ object ScanWatchdogPolicy {
 
     /**
      * 유휴 재시작이 연속 [consecutiveIdleRestarts]번 이어졌을 때 다음 세션의 유휴 한도.
-     * 60s → 2m → 4m → 8m → 10m(상한). 결과가 한 건이라도 오면 카운터를 0으로 되돌린다.
+     * 5m → 10m(상한). Avoid repeated scanner resets while outside garage. 결과가 한 건이라도 오면 카운터를 0으로 되돌린다.
      */
     fun idleLimitMs(consecutiveIdleRestarts: Int): Long {
         val shift = consecutiveIdleRestarts.coerceIn(0, 10)
