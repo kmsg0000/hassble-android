@@ -991,7 +991,7 @@ class BleRuntime(
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
         if (deviceId == "mytown_parking") {
             ParkingBleDiagnostics.start()
-            ParkingNativeProbe.start(appContext, scope, d.match?.manufacturerId)
+            ParkingNativeProbe.start(appContext, scope, d, ::safeOnReading)
             // Refresh a stale native scanner before advertising, not while the response is arriving.
             // Avoid resetting a just-created scanner (e.g. after the Carnival service restart).
             val lastScanStart = BleScanHealth.state.value.sessionStartMs ?: 0L
