@@ -15,6 +15,8 @@ import dev.eigger.hassble.service.LogType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import dev.eigger.hassble.config.DeviceConfig
+import dev.eigger.hassble.config.SourceField
 
 /**
  * Independent native BluetoothLeScanner lane for parking diagnostics.
@@ -22,12 +24,14 @@ import kotlinx.coroutines.launch
  * Never claims a packet is a parking position until the normal decoder verifies it.
  */
 object ParkingNativeProbe {
+    private fun ByteArray.toHex(): String = joinToString("") { "%02X".format(it.toInt() and 0xFF) }
     private var current: ScanCallback? = null
     private var activeScanner: android.bluetooth.le.BluetoothLeScanner? = null
     private var generation = 0
     @Synchronized
     @SuppressLint("MissingPermission")
-    fun start(context: Context, scope: CoroutineScope, manufacturerId: Int?) {
+    fun start(context: Context, scope: CoroutineScope, device: DeviceConfig, onReading: (RawReading) -> Unit) {
+        val manufacturerId = device.match?.manufacturerId
         val bt = context.getSystemService(BluetoothManager::class.java)?.adapter ?: return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)
             != PackageManager.PERMISSION_GRANTED) return
@@ -39,12 +43,52 @@ object ParkingNativeProbe {
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 if (mine != generation) return
-                if (seen++ < 12) {
-                    val rec = result.scanRecord
-                    val mfr = rec?.manufacturerSpecificData
-                    val ids = if (mfr != null) (0 until mfr.size()).map { mfr.keyAt(it) } else emptyList()
-                    LiveEventLogger.log(LogType.LINK,
-                        "Parking native scanner: callback mfrIds=$ids, addr=${result.device.address}, rssi=${result.rssi}")
+                val rec = result.scanRecord ?: return
+                val match = device.match ?: return
+                val address = result.device.address
+                val manufacturer = rec.manufacturerSpecificData
+                val name = if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
+                    == PackageManager.PERMISSION_GRANTED) runCatching { result.device.name ?: "" }.getOrDefault("") else ""
+                val serviceData = rec.serviceData.orEmpty()
+                val uuids = rec.serviceUuids.orEmpty()
+                val matches = AdvertisementMatcher.matches(
+                    match, address, name,
+                    hasServiceUuid = { requested ->
+                        val q = requested.uppercase()
+                        serviceData.keys.any { it.uuid.toString().uppercase().contains(q) } ||
+                            uuids.any { it.uuid.toString().uppercase().contains(q) }
+                    },
+                    manufacturerPayload = { id -> manufacturer?.get(id)?.takeIf { it.isNotEmpty() } },
+                )
+                if (seen++ < 12) LiveEventLogger.log(LogType.LINK,
+                    "Parking native scanner: raw callback matched=$matches, rssi=${result.rssi}")
+                if (!matches) return
+                val mfrHex = manufacturerId?.let { manufacturer?.get(it)?.toHex() }
+                val serviceHex = match.serviceDataUuid?.let { requested ->
+                    serviceData.entries.firstOrNull {
+                        it.key.uuid.toString().uppercase().contains(requested.uppercase())
+                    }?.value?.toHex()
+                }
+                val fullHex = rec.bytes?.toHex()
+                val primary = when (device.sensors.firstOrNull()?.sourceField ?: SourceField.raw) {
+                    SourceField.manufacturer_data -> mfrHex
+                    SourceField.service_data -> serviceHex
+                    SourceField.raw -> fullHex
+                }
+                if (primary.isNullOrBlank()) return
+                LiveEventLogger.log(LogType.LINK, "Parking native scanner: decoded candidate forwarded to HA pipeline")
+                scope.launch {
+                    onReading(RawReading(
+                        deviceId = device.id,
+                        source = "advertisement",
+                        rawHex = primary,
+                        macAddress = address,
+                        deviceName = name.takeIf { it.isNotEmpty() },
+                        manufacturerHex = mfrHex,
+                        serviceDataHex = serviceHex,
+                        fullScanHex = fullHex,
+                        isConnectable = result.isConnectable,
+                    ))
                 }
             }
             override fun onScanFailed(errorCode: Int) {
