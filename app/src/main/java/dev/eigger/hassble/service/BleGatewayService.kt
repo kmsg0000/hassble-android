@@ -585,7 +585,7 @@ class BleGatewayService : Service() {
                     scanner,
                     parkingScanner = dev.eigger.hassble.ble.NordicAdvertisementScanner(this@BleGatewayService, parkingWideFilter = true),
                     gatt = gattSource,
-                    obdSource,
+                    obd = obdSource,
                     advertiser = advertiser,
                     onDiscoveredAdvChanged = { _discoveredAdvInstances.value = it },
                     onSensorValuesChanged = { _sensorLastValues.value = it },
