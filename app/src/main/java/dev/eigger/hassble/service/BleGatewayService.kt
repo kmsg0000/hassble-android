@@ -581,6 +581,7 @@ class BleGatewayService : Service() {
                 val advertiser = dev.eigger.hassble.ble.AndroidBleAdvertiser(this@BleGatewayService, scope)
                 runtime = BleRuntime(
                     scope,
+                    applicationContext,
                     client,
                     scanner,
                     gattSource,
