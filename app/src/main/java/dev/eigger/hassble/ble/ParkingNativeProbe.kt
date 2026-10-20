@@ -8,6 +8,9 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.content.Intent
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import dev.eigger.hassble.service.LiveEventLogger
@@ -26,6 +29,16 @@ import dev.eigger.hassble.config.SourceField
 object ParkingNativeProbe {
     private fun ByteArray.toHex(): String = joinToString("") { "%02X".format(it.toInt() and 0xFF) }
     private var current: ScanCallback? = null
+    private var pendingScan: PendingIntent? = null
+    @Volatile private var pendingHandler: ((ScanResult) -> Unit)? = null
+    fun dispatchPending(intent: Intent) {
+        val error = intent.getIntExtra(android.bluetooth.le.BluetoothLeScanner.EXTRA_ERROR_CODE, 0)
+        if (error != 0) LiveEventLogger.log(LogType.LINK, "Parking pending scan error=$error")
+        @Suppress("DEPRECATION")
+        val results = intent.getParcelableArrayListExtra<ScanResult>(android.bluetooth.le.BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT).orEmpty()
+        if (results.isNotEmpty()) LiveEventLogger.log(LogType.LINK, "Parking PendingIntent: delivered ${results.size} result(s)")
+        results.forEach { pendingHandler?.invoke(it) }
+    }
     private var activeScanner: android.bluetooth.le.BluetoothLeScanner? = null
     private var generation = 0
     @Synchronized
@@ -37,6 +50,8 @@ object ParkingNativeProbe {
             != PackageManager.PERMISSION_GRANTED) return
         val scan = bt.bluetoothLeScanner ?: return
         current?.let { old -> runCatching { activeScanner?.stopScan(old) } }
+        pendingScan?.let { old -> runCatching { activeScanner?.stopScan(old) }; old.cancel() }
+        pendingScan = null
         generation++
         val mine = generation
         var seen = 0
@@ -107,7 +122,14 @@ object ParkingNativeProbe {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .setLegacy(false)
             .build()
+        val intent = Intent(context, ParkingScanReceiver::class.java).setAction("dev.eigger.hassble.PARKING_SCAN_RESULT")
+        val pi = PendingIntent.getBroadcast(context, 861, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
         try {
+            pendingHandler = { result -> callback.onScanResult(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, result) }
+            val code = scan.startScan(filters, settings, pi)
+            if (code != 0) throw IllegalStateException("PendingIntent scan start code=$code")
+            pendingScan = pi
+            LiveEventLogger.log(LogType.LINK, "Parking PendingIntent scan active (22s), manufacturer=$manufacturerId")
             scan.startScan(filters, settings, callback)
             current = callback
             activeScanner = scan
@@ -121,11 +143,20 @@ object ParkingNativeProbe {
             synchronized(this@ParkingNativeProbe) {
                 if (generation == mine) {
                     runCatching { scan.stopScan(callback) }
+                    pendingScan?.let { runCatching { scan.stopScan(it) }; it.cancel() }
+                    pendingScan = null
+                    pendingHandler = null
                     current = null
                     activeScanner = null
                     LiveEventLogger.log(LogType.LINK, "Parking native scanner: stopped, callbacks=$seen")
                 }
             }
         }
+    }
+}
+
+class ParkingScanReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        ParkingNativeProbe.dispatchPending(intent)
     }
 }
