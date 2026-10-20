@@ -56,6 +56,7 @@ class BleRuntime(
     private val scope: CoroutineScope,
     private val ws: HaWsClient,
     private val scanner: AdvertisementScanner,
+    private val parkingScanner: AdvertisementScanner? = null,
     private val gatt: GattNotifySource,
     private val obd: Elm327Source,
     private val advertiser: BleAdvertiser? = null,
@@ -72,6 +73,7 @@ class BleRuntime(
     private val json = Json { ignoreUnknownKeys = true }
     private var scanJob: Job? = null
     private var parkingTimeoutJob: Job? = null
+    private var parkingScanJob: Job? = null
     private var parkingRequestEpoch = 0L
     private val deviceConnectionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
@@ -990,6 +992,22 @@ class BleRuntime(
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
         if (deviceId == "mytown_parking") {
             ParkingBleDiagnostics.start()
+            parkingScanJob?.cancel()
+            parkingScanJob = parkingScanner?.let { dedicated ->
+                scope.launch {
+                    LiveEventLogger.log(LogType.LINK, "Parking dedicated filtered scan: start for 25s")
+                    try {
+                        kotlinx.coroutines.withTimeout(25_000L) {
+                            dedicated.scan(listOf(d), BleScanModeOption.LOW_LATENCY, false)
+                                .collect { safeOnReading(it) }
+                        }
+                    } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                        LiveEventLogger.log(LogType.LINK, "Parking dedicated filtered scan: window finished")
+                    } finally {
+                        dedicated.stop()
+                    }
+                }
+            }
             // Refresh a stale native scanner before advertising, not while the response is arriving.
             // Avoid resetting a just-created scanner (e.g. after the Carnival service restart).
             val lastScanStart = BleScanHealth.state.value.sessionStartMs ?: 0L
@@ -1022,6 +1040,8 @@ class BleRuntime(
         stopped = true
         parkingTimeoutJob?.cancel()
         parkingTimeoutJob = null
+        parkingScanJob?.cancel()
+        parkingScanJob = null
         scanJob?.cancel()
         scanJob = null
         presenceJob?.cancel()
