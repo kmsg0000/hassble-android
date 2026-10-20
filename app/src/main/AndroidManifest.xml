@@ -72,6 +72,8 @@
             android:process=":restart"
             android:foregroundServiceType="connectedDevice" />
 
+        <receiver android:name=".ble.ParkingScanReceiver" android:enabled="true" android:exported="false" />
+
         <receiver
             android:name=".service.GatewayRecoveryReceiver"
             android:enabled="true"
