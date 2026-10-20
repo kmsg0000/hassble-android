@@ -81,7 +81,7 @@ private const val PREREQ_POLL_MS = 2_000L
  * BleScanner(context).scan() 결과를 설정 필터(namePrefix, serviceDataUuid 등)와 대조하여
  * 매칭되는 기기의 페이로드 데이터를 추출하여 방출합니다.
  */
-class NordicAdvertisementScanner(private val context: Context) : AdvertisementScanner {
+class NordicAdvertisementScanner(private val context: Context, private val parkingWideFilter: Boolean = false) : AdvertisementScanner {
     private val scanner by lazy { BleScanner(context) }
 
     // Simple cache to merge ADV_IND and SCAN_RSP data per MAC address.
@@ -154,7 +154,7 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
         val screen = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         LiveEventLogger.log(LogType.LINK,
             "BLE scan screen=${if (screen.isInteractive) "interactive" else "locked/off"}, native filters=${scanFilters.size}, legacy=false")
-        LiveEventLogger.log(LogType.LINK, "BLE scan mode: ${scanMode.label}, filters: ${scanFilters.size}")
+        LiveEventLogger.log(LogType.LINK, "BLE scan mode: ${scanMode.label}, filters: ${scanFilters.size}, parkingWide=$parkingWideFilter")
         if (scanFilters.isEmpty()) {
             // Android 8.1+는 필터 없는 스캔에 화면이 꺼진 동안 결과를 주지 않는다.
             LiveEventLogger.log(LogType.LINK,
@@ -495,7 +495,7 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                     filters.add(BleScanFilter(
                         manufacturerData = FilteredManufacturerData(
                             id = match.manufacturerId,
-                            data = DataByteArray(prefixBytes?.take(1)?.toByteArray() ?: ByteArray(0))
+                            data = DataByteArray(if (parkingWideFilter) ByteArray(0) else prefixBytes?.take(1)?.toByteArray() ?: ByteArray(0))
                         )
                     ))
                 }
