@@ -116,6 +116,8 @@ class BleGatewayService : Service() {
 
     // Bluetooth OFF→ON은 스캔 세션을 콜백 없이 죽인다. ON에서 스캐너를 바로 다시 세운다.
     // OFF에서는 건드리지 않는다 — 스캐너가 ON을 기다리는 루프에 스스로 들어가고, 어차피 ON에서 갈아 끼운다.
+    private val carnivalReceiver = CarnivalBluetoothReceiver()
+
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
@@ -146,6 +148,12 @@ class BleGatewayService : Service() {
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        // Keep classic Bluetooth disconnect observation alive while screen is off.
+        val carFilter = IntentFilter().apply {
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(this, carnivalReceiver, carFilter, ContextCompat.RECEIVER_EXPORTED)
         BluetoothAdapterNameGuard.resetToInitial(this)
     }
 
@@ -188,6 +196,23 @@ class BleGatewayService : Service() {
         // 최근 앱 목록에서 스와이프해도 FGS는 계속 돈다. 사용자가 "앱을 껐는데도 돈다/안 돈다"를
         // 로그로 가릴 수 있게 남긴다.
         LiveEventLogger.log(LogType.LINK, "App task removed — foreground service keeps running")
+        // Samsung firmware can kill the foreground service after the task disappears.
+        // Queue a one-shot best-effort restart as a fallback to START_STICKY.
+        // Android may block background FGS launches and force-stop cancels alarms.
+        val alarm = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+        val restartIntent = Intent(this, GatewayRecoveryReceiver::class.java)
+            .setAction(GatewayRecoveryReceiver.ACTION_RECOVER)
+        val pending = android.app.PendingIntent.getBroadcast(
+            this, 1789, restartIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        runCatching {
+            alarm?.setAndAllowWhileIdle(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 30_000L,
+                pending,
+            )
+        }.onFailure { LiveEventLogger.log(LogType.LINK, "Task removal fallback alarm failed: ${it.message}") }
         super.onTaskRemoved(rootIntent)
     }
 
@@ -366,6 +391,21 @@ class BleGatewayService : Service() {
                 client.bridgeConnected.collect { guarded("bridge (re)connect handling") {
                     declareGatewayEntities(client)
                     publishGatewayStates(client)
+                // Retry parking request once after a genuine Android service stop/start.
+                val recoveryPrefs = getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
+                if (recoveryPrefs.getBoolean("retry_pending", false)) {
+                    recoveryPrefs.edit().putBoolean("retry_pending", false).apply()
+                    scope.launch {
+                        delay(700L)
+                        LiveEventLogger.log(LogType.LINK, "Parking service restart complete: retrying location once")
+                        runtime?.triggerAdvertise("mytown_parking")
+                        if (recoveryPrefs.getBoolean("carnival_second_request", false)) {
+                            recoveryPrefs.edit().putBoolean("carnival_second_request", false).apply()
+                            delay(4_000L)
+                            runtime?.triggerAdvertise("mytown_parking")
+                        }
+                    }
+                }
                     val repository = HassSettingsRepository(this@BleGatewayService)
                     val pendingFromStore = repository.consumePendingHaRemovals()
                     // 선언 내용이 바뀐 device의 HA 엔티티를 먼저 제거 후 재선언
@@ -543,8 +583,9 @@ class BleGatewayService : Service() {
                     scope,
                     client,
                     scanner,
-                    gattSource,
-                    obdSource,
+                    parkingScanner = dev.eigger.hassble.ble.NordicAdvertisementScanner(this@BleGatewayService, parkingWideFilter = true),
+                    gatt = gattSource,
+                    obd = obdSource,
                     advertiser = advertiser,
                     onDiscoveredAdvChanged = { _discoveredAdvInstances.value = it },
                     onSensorValuesChanged = { _sensorLastValues.value = it },
@@ -563,8 +604,26 @@ class BleGatewayService : Service() {
                         _advertisingDeviceIds.value = if (isAdv) cur + id else cur - id
                     },
                     onPipelineError = { runCatching { updateNotification() } },
+                    onParkingResponseTimeout = {
+                        // Real Android Service stop/start, matching the UI buttons.
+                        val appContext = applicationContext
+                        val now = System.currentTimeMillis()
+                        val p = appContext.getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
+                        val last = p.getLong("last_at", 0L)
+                        if (now - last >= 30_000L) {
+                            p.edit().putLong("last_at", now).putBoolean("retry_pending", true).apply()
+                            LiveEventLogger.log(LogType.LINK, "Parking recovery: requesting real Service Stop -> Start")
+                            val intent = Intent(appContext, GatewayProcessRestartService::class.java)
+                                .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
+                            runCatching { ContextCompat.startForegroundService(appContext, intent) }
+                                .onFailure { LiveEventLogger.log(LogType.LINK, "[Error] Parking service helper: ${it.message}") }
+                        } else {
+                            LiveEventLogger.log(LogType.LINK, "Parking recovery skipped: cooldown 30s")
+                        }
+                    },
                 ).also { it.start() }
                 publishGatewayStates(client)
+
             }
 
             settingsJob = scope.launch {
@@ -651,9 +710,11 @@ class BleGatewayService : Service() {
                 updateNotification()
             }
             uid == "${gid}_gateway_restart" || uid.endsWith("__${gid}_gateway_restart") || uid.endsWith("_gateway_restart") -> {
-                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart (full process restart)")
-                ws?.sendStates(listOf("${gid}_gateway_running" to "off"))
-                fullProcessRestart()
+                LiveEventLogger.log(LogType.LINK, "HA command: Gateway Restart -> actual UI Stop/Start service cycle")
+                val restartIntent = Intent(applicationContext, GatewayProcessRestartService::class.java)
+                    .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
+                runCatching { ContextCompat.startForegroundService(applicationContext, restartIntent) }
+                    .onFailure { LiveEventLogger.log(LogType.LINK, "[Error] Manual service cycle failed: ${it.message}") }
             }
         }
     }
@@ -740,6 +801,7 @@ class BleGatewayService : Service() {
         LiveEventLogger.log(LogType.LINK, "Foreground service stopping")
         unregisterNetworkCallback()
         runCatching { unregisterReceiver(bluetoothStateReceiver) }
+        runCatching { unregisterReceiver(carnivalReceiver) }
         configJob?.cancel()
         settingsJob?.cancel()
         wsStateJob?.cancel()

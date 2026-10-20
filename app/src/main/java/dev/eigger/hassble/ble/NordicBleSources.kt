@@ -56,6 +56,23 @@ private fun uuidFrom(str: String): UUID {
 }
 
 private const val TAG = "HassBleSources"
+
+/** A bounded, short diagnostic window after an explicit parking request. */
+object ParkingBleDiagnostics {
+    @Volatile private var untilMs = 0L
+    private val logged = java.util.concurrent.atomic.AtomicInteger(0)
+    fun start() {
+        logged.set(0)
+        untilMs = System.currentTimeMillis() + 25_000L
+        LiveEventLogger.log(LogType.LINK, "Parking BLE diagnostics: 25s capture armed (native hardware filters still apply)")
+    }
+    fun active(): Boolean = System.currentTimeMillis() < untilMs
+    fun log(message: String) {
+        if (active() && logged.getAndIncrement() < 30) {
+            LiveEventLogger.log(LogType.LINK, "Parking BLE diagnostics: $message")
+        }
+    }
+}
 /** 권한/Bluetooth ON을 기다리는 동안의 재확인 주기. */
 private const val PREREQ_POLL_MS = 2_000L
 
@@ -64,7 +81,7 @@ private const val PREREQ_POLL_MS = 2_000L
  * BleScanner(context).scan() 결과를 설정 필터(namePrefix, serviceDataUuid 등)와 대조하여
  * 매칭되는 기기의 페이로드 데이터를 추출하여 방출합니다.
  */
-class NordicAdvertisementScanner(private val context: Context) : AdvertisementScanner {
+class NordicAdvertisementScanner(private val context: Context, private val parkingWideFilter: Boolean = false) : AdvertisementScanner {
     private val scanner by lazy { BleScanner(context) }
 
     // Simple cache to merge ADV_IND and SCAN_RSP data per MAC address.
@@ -130,10 +147,14 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
         }
         val scanSettings = BleScannerSettings(
             scanMode = nativeScanMode,
-            legacy = true,
+            // Include legacy AND extended BLE advertisements on Android 17.
+            legacy = false,
         )
         val scanFilters = if (unfiltered) emptyList() else buildScanFilters(devices)
-        LiveEventLogger.log(LogType.LINK, "BLE scan mode: ${scanMode.label}, filters: ${scanFilters.size}")
+        val screen = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        LiveEventLogger.log(LogType.LINK,
+            "BLE scan screen=${if (screen.isInteractive) "interactive" else "locked/off"}, native filters=${scanFilters.size}, legacy=false")
+        LiveEventLogger.log(LogType.LINK, "BLE scan mode: ${scanMode.label}, filters: ${scanFilters.size}, parkingWide=$parkingWideFilter")
         if (scanFilters.isEmpty()) {
             // Android 8.1+는 필터 없는 스캔에 화면이 꺼진 동안 결과를 주지 않는다.
             LiveEventLogger.log(LogType.LINK,
@@ -180,6 +201,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                         scanner.scan(filters = scanFilters, settings = scanSettings).collect { result ->
                             val now = System.currentTimeMillis()
                             lastResultMs.set(now)
+                            if (!gotResultThisSession && !screen.isInteractive) {
+                                LiveEventLogger.log(LogType.LINK, "BLE scan: native ScanResult received while screen locked")
+                            }
                             gotResultThisSession = true
                             BleScanHealth.onResult(now)
                             val deviceName = result.device.name ?: ""
@@ -217,6 +241,11 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                             val serviceData = serviceDataCache[deviceAddress] ?: scanRecord?.serviceData ?: emptyMap()
                             val advertisedServiceUuids = serviceUuidsCache[deviceAddress] ?: scanRecord?.serviceUuids.orEmpty()
                             val rawBytes = scanRecord?.bytes
+                            if (ParkingBleDiagnostics.active()) {
+                                val ids = (0 until (manufacturerData?.size() ?: 0)).map { manufacturerData!!.keyAt(it) }
+                                val svc = serviceData.keys.map { getShortUuid(it.uuid) }
+                                ParkingBleDiagnostics.log("raw callback addr=$deviceAddress, mfrIds=$ids, svc=$svc, locked=${!screen.isInteractive}")
+                            }
         
                             // LiveEventLogger.log()는 includeAdvLogs가 꺼져 있으면(기본값) ADV 항목을
                             // 그냥 버린다. 그런데 이 hex 포맷팅 자체가 스캔 결과마다(주행 중엔 초당
@@ -273,6 +302,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                                     if (match.manufacturerId != null || match.serviceDataUuid != null) {
                                         Log.d(TAG, "  NO MATCH profile=${d.id} mfrId=${match.manufacturerId} svcUuid=${match.serviceDataUuid}")
                                     }
+                                    if (d.id == "mytown_parking") {
+                                        ParkingBleDiagnostics.log("mytown_parking software matcher rejected addr=$deviceAddress")
+                                    }
                                     continue
                                 }
         
@@ -289,6 +321,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                                     SourceField.service_data -> serviceDataHex
                                     SourceField.manufacturer_data -> manufacturerHex
                                     SourceField.raw -> fullScanHex
+                                }
+                                if (d.id == "mytown_parking") {
+                                    ParkingBleDiagnostics.log("mytown_parking MATCH addr=$deviceAddress, source=$primaryField, payload=${primaryHex?.take(32) ?: "null"}")
                                 }
                                 if (primaryHex.isNullOrBlank()) {
                                     Log.d(TAG, "  MATCHED ${d.id} addr=$deviceAddress but $primaryField is null (mfr=$manufacturerHex)")
@@ -449,8 +484,9 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                 match.manufacturerId != null -> {
                     // Empty data bytes (ByteArray(0)) is ambiguous: some BLE chips interpret it
                     // as "payload must be empty", silently dropping all non-empty payloads.
-                    // Use manufacturer_hex_prefix bytes as the filter when available — this gives
-                    // a reliable, non-empty hardware filter that also enables background scanning.
+                    // Keep only the first manufacturer prefix byte in the hardware filter.
+                    // The software AdvertisementMatcher still checks the full prefix.
+                    // Filtering the full variable payload in hardware can discard parking responses.
                     val prefixBytes = match.manufacturerHexPrefix
                         ?.chunked(2)
                         ?.mapNotNull { it.toIntOrNull(16)?.toByte() }
@@ -459,7 +495,7 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                     filters.add(BleScanFilter(
                         manufacturerData = FilteredManufacturerData(
                             id = match.manufacturerId,
-                            data = DataByteArray(prefixBytes ?: ByteArray(0))
+                            data = DataByteArray(if (parkingWideFilter) ByteArray(0) else prefixBytes?.take(1)?.toByteArray() ?: ByteArray(0))
                         )
                     ))
                 }
