@@ -74,6 +74,8 @@ class BleRuntime(
     private var scanJob: Job? = null
     private var parkingTimeoutJob: Job? = null
     private var parkingRequestEpoch = 0L
+    private var parkingButtonRetryJob: Job? = null
+    private val parkingValidResponseCount = java.util.concurrent.atomic.AtomicLong(0L)
     private val deviceConnectionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private lateinit var config: GatewayConfig
@@ -792,6 +794,14 @@ class BleRuntime(
                 }
             }
         }
+        if (d.id == "mytown_parking" &&
+            out.any { it.first == "mytown_parking_parking_floor" } &&
+            out.any { it.first == "mytown_parking_parking_location" }) {
+            parkingValidResponseCount.incrementAndGet()
+            parkingButtonRetryJob?.cancel()
+            parkingButtonRetryJob = null
+            LiveEventLogger.log(LogType.LINK, "Parking request: floor and location received, stopping retry")
+        }
         ws.sendStates(out)
     }
 
@@ -847,17 +857,23 @@ class BleRuntime(
                 when (cmd.action) {
                     "press", "turn_on" -> {
                         if (d.id == "mytown_parking") {
-                            scheduleParkingResponseCheck()
-                            // Parking receivers may stop delivering results after long idle periods.
-                            // Complete a BLE scan teardown/re-registration before advertising.
-                            // Only the parking request takes this path; door and other devices
-                            // retain their existing behaviour.
-                            scope.launch {
-                                // Reuse the already running filtered scanner: frequent start/stop
-                                // can trigger Android scan throttling especially with screen locked.
-                                LiveEventLogger.log(LogType.LINK, "Parking request: using active BLE scan")
-                                if (scanJob?.isActive != true) relaunchScan("parking scanner inactive").join()
-                                if (!stopped) startAdvertise(d)
+                            // HA button: keep requesting until BOTH position sensors decode a
+                            // fresh response, with a hard cap to avoid indefinite radio usage.
+                            parkingButtonRetryJob?.cancel()
+                            parkingTimeoutJob?.cancel()
+                            parkingRequestEpoch++
+                            val baseline = parkingValidResponseCount.get()
+                            parkingButtonRetryJob = scope.launch {
+                                for (attempt in 1..5) {
+                                    if (stopped || parkingValidResponseCount.get() > baseline) break
+                                    LiveEventLogger.log(LogType.LINK, "HA parking button: request $attempt/5")
+                                    if (scanJob?.isActive != true) relaunchScan("parking button scanner inactive").join()
+                                    if (!stopped) triggerAdvertise(d.id)
+                                    delay(8_000L)
+                                }
+                                if (!stopped && parkingValidResponseCount.get() == baseline) {
+                                    LiveEventLogger.log(LogType.LINK, "HA parking button: no complete position after 5 requests; stopped")
+                                }
                             }
                         } else {
                             startAdvertise(d)
