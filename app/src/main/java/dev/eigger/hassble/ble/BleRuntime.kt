@@ -54,6 +54,7 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class BleRuntime(
     private val scope: CoroutineScope,
+    private val appContext: android.content.Context,
     private val ws: HaWsClient,
     private val scanner: AdvertisementScanner,
     private val gatt: GattNotifySource,
@@ -67,9 +68,12 @@ class BleRuntime(
     private val onAdvertisingChanged: (String, Boolean) -> Unit = { _, _ -> },
     /** 처리 오류 로그가 남을 때(새 종류 첫 발생·반복 N회마다). 서비스가 알림의 오류 건수를 갱신한다. */
     private val onPipelineError: () -> Unit = {},
+    private val onParkingResponseTimeout: () -> Unit = {},
 ) {
     private val json = Json { ignoreUnknownKeys = true }
     private var scanJob: Job? = null
+    private var parkingTimeoutJob: Job? = null
+    private var parkingRequestEpoch = 0L
     private val deviceConnectionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private lateinit var config: GatewayConfig
@@ -122,6 +126,8 @@ class BleRuntime(
     @Volatile private var lastCommandMs = 0L
     private val collectorRestarts = java.util.concurrent.atomic.AtomicLong(0)
     private var eventJob: Job? = null
+    private var parkingHaRetryJob: Job? = null
+    @Volatile private var parkingHaResponseDone = false
     private val lastSensorValues = java.util.concurrent.ConcurrentHashMap<String, SensorLastValue>()
     private var validationIssues: List<ValidationIssue> = emptyList()
     // async HA cleanup 진행 중인 deviceId → 완료 전 apply()에서 재시작 방지
@@ -605,8 +611,8 @@ class BleRuntime(
     }
 
     /** 현재 세션을 취소 완료까지 기다린 뒤 새 세션을 띄운다. 연달아 불려도 mutex로 한 번에 하나씩. */
-    private fun relaunchScan(reason: String) {
-        scope.launch {
+    private fun relaunchScan(reason: String): Job {
+        return scope.launch {
             scanLifecycleMutex.withLock {
                 scanJob?.cancelAndJoin()
                 scanJob = null
@@ -722,6 +728,11 @@ class BleRuntime(
 
         when (d.source) {
             Source.advertisement -> {
+                if (d.id == "mytown_parking") {
+                    parkingRequestEpoch++
+                    parkingTimeoutJob?.cancel()
+                    parkingTimeoutJob = null
+                }
                 val mac = r.macAddress ?: return
                 if (d.advertise?.stopOnResponse == true && advertiser?.isAdvertising(d.id) == true) {
                     advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)
@@ -783,6 +794,13 @@ class BleRuntime(
                 }
             }
         }
+        if (d.id == "mytown_parking" && parkingHaRetryJob?.isActive == true) {
+            val keys = out.map { it.first }.toSet()
+            if ("mytown_parking_parking_floor" in keys && "mytown_parking_parking_location" in keys) {
+                parkingHaResponseDone = true
+                LiveEventLogger.log(LogType.LINK, "Parking HA button: floor and location received; stopping retries")
+            }
+        }
         ws.sendStates(out)
     }
 
@@ -836,7 +854,28 @@ class BleRuntime(
         when (c.action) {
             ControlAction.advertise -> {
                 when (cmd.action) {
-                    "press", "turn_on" -> startAdvertise(d)
+                    "press", "turn_on" -> {
+                        if (d.id == "mytown_parking") {
+                            // HA button: request up to 30s, stop as soon as BOTH decoded sensors arrive.
+                            // Keep the normal vehicle-disconnect recovery path separate.
+                            parkingHaRetryJob?.cancel()
+                            parkingHaResponseDone = false
+                            parkingHaRetryJob = scope.launch {
+                                repeat(5) { attempt ->
+                                    if (stopped || parkingHaResponseDone) return@launch
+                                    LiveEventLogger.log(LogType.LINK, "Parking HA button: attempt ${attempt + 1}/5")
+                                    triggerAdvertise(d.id)
+                                    repeat(6) {
+                                        delay(1_000L)
+                                        if (stopped || parkingHaResponseDone) return@launch
+                                    }
+                                }
+                                LiveEventLogger.log(LogType.LINK, "Parking HA button: stopped after 30s without complete position")
+                            }
+                        } else {
+                            startAdvertise(d)
+                        }
+                    }
                     "turn_off" -> stopAdvertise(d.id)
                 }
                 return
@@ -906,6 +945,18 @@ class BleRuntime(
         onLinkStatus(DeviceLinkStatus(deviceId, DeviceLinkState.Disconnected, mac))
     }
 
+    private fun scheduleParkingResponseCheck() {
+        val epoch = ++parkingRequestEpoch
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = scope.launch {
+            delay(5_000L)
+            if (!stopped && epoch == parkingRequestEpoch) {
+                LiveEventLogger.log(LogType.LINK, "Parking response missing after 5s — requesting one full gateway recovery")
+                onParkingResponseTimeout()
+            }
+        }
+    }
+
     private fun startAdvertise(d: DeviceConfig) {
         val advConfig = d.advertise ?: return
         if (ConfigValidator.hasDeviceError(validationIssues, d.id)) return
@@ -951,6 +1002,23 @@ class BleRuntime(
     fun triggerAdvertise(deviceId: String) {
         if (!::config.isInitialized) return
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
+        if (deviceId == "mytown_parking") {
+            ParkingBleDiagnostics.start()
+            ParkingNativeProbe.start(appContext, scope, d, ::safeOnReading)
+            // Refresh a stale native scanner before advertising, not while the response is arriving.
+            // Avoid resetting a just-created scanner (e.g. after the Carnival service restart).
+            val lastScanStart = BleScanHealth.state.value.sessionStartMs ?: 0L
+            if (System.currentTimeMillis() - lastScanStart > 20_000L) {
+                scope.launch {
+                    LiveEventLogger.log(LogType.LINK, "Parking request: refreshing native scan before BLE advertise")
+                    val scanRestart = relaunchScan("parking preflight refresh")
+                    scanRestart.join()
+                    delay(350L)
+                    if (!stopped) startAdvertise(d)
+                }
+                return
+            }
+        }
         startAdvertise(d)
     }
 
@@ -965,8 +1033,12 @@ class BleRuntime(
         // HA 게이트웨이 재시작 시 이전 runtime의 command collector가 남아 중복 처리하지 않도록 먼저 종료한다.
         eventJob?.cancel()
         eventJob = null
+        parkingHaRetryJob?.cancel()
+        parkingHaRetryJob = null
         // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.
         stopped = true
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = null
         scanJob?.cancel()
         scanJob = null
         presenceJob?.cancel()
