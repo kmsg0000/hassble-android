@@ -491,20 +491,36 @@ private fun HomeScreen() {
         }
     }
 
+    // 화면이 꺼진 채 백그라운드에서 동작하는 서비스가 BLE 스캔 결과를 받으려면 위치 "항상 허용"이 필요하다.
+    // Android 11+에서는 다른 권한과 함께 요청할 수 없어서, 포그라운드 위치가 허용된 뒤 따로 요청한다
+    // (시스템이 앱 위치 권한 설정 화면으로 보내 준다).
+    fun needsBackgroundLocation(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED
+
     fun refreshPermissions() {
         missingPermCount = permissionsToRequest.count {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
-        }
+        } + if (needsBackgroundLocation()) 1 else 0
     }
 
+    val backgroundLocationLauncher = rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestPermission()) {
+        refreshPermissions()
+    }
     val launcher = rememberLauncherForActivityResult(contract = ActivityResultContracts.RequestMultiplePermissions()) {
         refreshPermissions()
         BluetoothAdapterNameGuard.resetToInitial(context)
+        if (needsBackgroundLocation()) backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
     }
     LaunchedEffect(Unit) {
         refreshPermissions()
         val ungranted = permissionsToRequest.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
-        if (ungranted.isNotEmpty()) launcher.launch(ungranted.toTypedArray())
+        if (ungranted.isNotEmpty()) {
+            launcher.launch(ungranted.toTypedArray())
+        } else if (needsBackgroundLocation()) {
+            backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
     }
     DisposableEffect(lifecycleOwner) {
         val permObserver = LifecycleEventObserver { _, event ->

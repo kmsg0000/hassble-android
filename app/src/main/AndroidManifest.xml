@@ -24,6 +24,9 @@
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- 화면이 꺼진 채 백그라운드에서 동작하는 서비스의 BLE 스캔 결과를 받으려면 위치 "항상 허용"이 필요하다.
+         이 선언이 없으면 설정에 "항상 허용" 선택지가 아예 나타나지 않는다(Android 10+). -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
