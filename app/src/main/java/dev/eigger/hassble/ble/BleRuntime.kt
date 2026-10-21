@@ -73,6 +73,9 @@ class BleRuntime(
     private val json = Json { ignoreUnknownKeys = true }
     private var scanJob: Job? = null
     private var parkingTimeoutJob: Job? = null
+    private var parkingButtonRetryJob: Job? = null
+    @Volatile private var parkingFloorReceived = false
+    @Volatile private var parkingLocationReceived = false
     private var parkingRequestEpoch = 0L
     private val deviceConnectionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
@@ -726,11 +729,8 @@ class BleRuntime(
 
         when (d.source) {
             Source.advertisement -> {
-                if (d.id == "mytown_parking") {
-                    parkingRequestEpoch++
-                    parkingTimeoutJob?.cancel()
-                    parkingTimeoutJob = null
-                }
+                // A matching manufacturer packet alone is not sufficient: wait until
+                // both floor and pillar values are actually decoded and published.
                 val mac = r.macAddress ?: return
                 if (d.advertise?.stopOnResponse == true && advertiser?.isAdvertising(d.id) == true) {
                     advertiser.stop(d.id, AdvertiseStopReason.ResponseReceived)
@@ -792,6 +792,18 @@ class BleRuntime(
                 }
             }
         }
+        if (d.id == "mytown_parking" && out.isNotEmpty()) {
+            if (out.any { it.first.endsWith("_parking_floor") }) parkingFloorReceived = true
+            if (out.any { it.first.endsWith("_parking_location") }) parkingLocationReceived = true
+            if (parkingFloorReceived && parkingLocationReceived) {
+                parkingRequestEpoch++
+                parkingTimeoutJob?.cancel()
+                parkingTimeoutJob = null
+                parkingButtonRetryJob?.cancel()
+                parkingButtonRetryJob = null
+                LiveEventLogger.log(LogType.LINK, "Parking location received (floor + pillar): retry loop stopped")
+            }
+        }
         ws.sendStates(out)
     }
 
@@ -847,17 +859,23 @@ class BleRuntime(
                 when (cmd.action) {
                     "press", "turn_on" -> {
                         if (d.id == "mytown_parking") {
-                            scheduleParkingResponseCheck()
-                            // Parking receivers may stop delivering results after long idle periods.
-                            // Complete a BLE scan teardown/re-registration before advertising.
-                            // Only the parking request takes this path; door and other devices
-                            // retain their existing behaviour.
-                            scope.launch {
-                                // Reuse the already running filtered scanner: frequent start/stop
-                                // can trigger Android scan throttling especially with screen locked.
-                                LiveEventLogger.log(LogType.LINK, "Parking request: using active BLE scan")
-                                if (scanJob?.isActive != true) relaunchScan("parking scanner inactive").join()
-                                if (!stopped) startAdvertise(d)
+                            // Same dedicated receiver path as automatic Carnival requests.
+                            // One active bounded request loop per user action.
+                            parkingButtonRetryJob?.cancel()
+                            parkingFloorReceived = false
+                            parkingLocationReceived = false
+                            parkingTimeoutJob?.cancel()
+                            parkingTimeoutJob = null
+                            parkingButtonRetryJob = scope.launch {
+                                for (attempt in 1..4) {
+                                    if (stopped || (parkingFloorReceived && parkingLocationReceived)) break
+                                    LiveEventLogger.log(LogType.LINK, "HA parking button: request $attempt/4")
+                                    triggerAdvertise(d.id)
+                                    delay(6_000L)
+                                }
+                                if (!stopped && !(parkingFloorReceived && parkingLocationReceived)) {
+                                    LiveEventLogger.log(LogType.LINK, "HA parking button: no complete response after 4 requests; stopped")
+                                }
                             }
                         } else {
                             startAdvertise(d)
