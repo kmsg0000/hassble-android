@@ -150,11 +150,11 @@ class HaWsClient(
         }
     }
 
-    fun declareEntity(msg: EntityMsg) {
+    @Synchronized fun declareEntity(msg: EntityMsg) {
         enqueueOrSend(json.encodeToString(EntityMsg.serializer(), msg.copy(id = idGen.getAndIncrement())))
     }
 
-    fun sendStates(states: List<Pair<String, Any?>>) {
+    @Synchronized fun sendStates(states: List<Pair<String, Any?>>) {
         if (states.isEmpty()) return
         enqueueOrSend(buildJsonObject {
             put("id", idGen.getAndIncrement())
@@ -186,7 +186,7 @@ class HaWsClient(
         else -> JsonPrimitive(v.toString())
     }
 
-    fun sendInitialStates(uids: List<String>) {
+    @Synchronized fun sendInitialStates(uids: List<String>) {
         if (uids.isEmpty()) return
         enqueueOrSend(buildJsonObject {
             put("id", idGen.getAndIncrement())
@@ -201,7 +201,7 @@ class HaWsClient(
         }.toString())
     }
 
-    fun sendAvailability(deviceId: String, online: Boolean) {
+    @Synchronized fun sendAvailability(deviceId: String, online: Boolean) {
         enqueueOrSend(buildJsonObject {
             put("id", idGen.getAndIncrement())
             put("type", "$WS_DOMAIN/availability")
@@ -274,7 +274,7 @@ class HaWsClient(
 
     private fun send(text: String) {
         ws?.send(text)
-        LiveEventLogger.log(LogType.TX, "WS: $text")
+        LiveEventLogger.log(LogType.TX, if (text.contains("access_token")) "WS: [auth token redacted]" else "WS: $text")
     }
 
     private fun flushPendingMessages() {
@@ -283,7 +283,18 @@ class HaWsClient(
             if (queued.isNotEmpty()) {
                 LiveEventLogger.log(LogType.LINK, "WS: flushing ${queued.size} queued message(s) after (re)connect")
             }
-            for (text in queued) send(text)
+            for (text in queued) {
+                // Reassign queued message IDs after ws_bridge/connect so they are
+                // strictly increasing on this connection.
+                val parsed = runCatching { json.parseToJsonElement(text) }.getOrNull()
+                val obj = parsed as? JsonObject
+                if (obj != null && "id" in obj) {
+                    val fresh = buildJsonObject {
+                        for ((key, value) in obj) put(key, if (key == "id") JsonPrimitive(idGen.getAndIncrement()) else value)
+                    }
+                    send(fresh.toString())
+                } else send(text)
+            }
         }
     }
 
