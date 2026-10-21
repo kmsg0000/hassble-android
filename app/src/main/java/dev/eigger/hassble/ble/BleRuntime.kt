@@ -126,6 +126,8 @@ class BleRuntime(
     @Volatile private var lastCommandMs = 0L
     private val collectorRestarts = java.util.concurrent.atomic.AtomicLong(0)
     private var eventJob: Job? = null
+    private var parkingHaRetryJob: Job? = null
+    @Volatile private var parkingHaResponseDone = false
     private val lastSensorValues = java.util.concurrent.ConcurrentHashMap<String, SensorLastValue>()
     private var validationIssues: List<ValidationIssue> = emptyList()
     // async HA cleanup 진행 중인 deviceId → 완료 전 apply()에서 재시작 방지
@@ -792,6 +794,13 @@ class BleRuntime(
                 }
             }
         }
+        if (d.id == "mytown_parking" && parkingHaRetryJob?.isActive == true) {
+            val keys = out.map { it.first }.toSet()
+            if ("mytown_parking_parking_floor" in keys && "mytown_parking_parking_location" in keys) {
+                parkingHaResponseDone = true
+                LiveEventLogger.log(LogType.LINK, "Parking HA button: floor and location received; stopping retries")
+            }
+        }
         ws.sendStates(out)
     }
 
@@ -847,17 +856,21 @@ class BleRuntime(
                 when (cmd.action) {
                     "press", "turn_on" -> {
                         if (d.id == "mytown_parking") {
-                            scheduleParkingResponseCheck()
-                            // Parking receivers may stop delivering results after long idle periods.
-                            // Complete a BLE scan teardown/re-registration before advertising.
-                            // Only the parking request takes this path; door and other devices
-                            // retain their existing behaviour.
-                            scope.launch {
-                                // Reuse the already running filtered scanner: frequent start/stop
-                                // can trigger Android scan throttling especially with screen locked.
-                                LiveEventLogger.log(LogType.LINK, "Parking request: using active BLE scan")
-                                if (scanJob?.isActive != true) relaunchScan("parking scanner inactive").join()
-                                if (!stopped) startAdvertise(d)
+                            // HA button: request up to 30s, stop as soon as BOTH decoded sensors arrive.
+                            // Keep the normal vehicle-disconnect recovery path separate.
+                            parkingHaRetryJob?.cancel()
+                            parkingHaResponseDone = false
+                            parkingHaRetryJob = scope.launch {
+                                repeat(5) { attempt ->
+                                    if (stopped || parkingHaResponseDone) return@launch
+                                    LiveEventLogger.log(LogType.LINK, "Parking HA button: attempt ${attempt + 1}/5")
+                                    triggerAdvertise(d.id)
+                                    repeat(6) {
+                                        delay(1_000L)
+                                        if (stopped || parkingHaResponseDone) return@launch
+                                    }
+                                }
+                                LiveEventLogger.log(LogType.LINK, "Parking HA button: stopped after 30s without complete position")
                             }
                         } else {
                             startAdvertise(d)
@@ -1020,6 +1033,8 @@ class BleRuntime(
         // HA 게이트웨이 재시작 시 이전 runtime의 command collector가 남아 중복 처리하지 않도록 먼저 종료한다.
         eventJob?.cancel()
         eventJob = null
+        parkingHaRetryJob?.cancel()
+        parkingHaRetryJob = null
         // relaunchScan()이 대기 중이어도 launchScan()으로 넘어가지 못하게 먼저 막는다.
         stopped = true
         parkingTimeoutJob?.cancel()
