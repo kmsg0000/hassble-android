@@ -76,6 +76,8 @@ class HaWsClient(
         explicitNulls = false
     }
     private val idGen = AtomicInteger(1)
+    private val sendOrderLock = Any()
+    private var highestSentId = 0
     private var ws: WebSocket? = null
     private var connectMessageId: Int? = null
     private var bridgeTimeoutJob: Job? = null
@@ -273,8 +275,30 @@ class HaWsClient(
     val pendingMessageCount: Int get() = pendingMessages.size
 
     private fun send(text: String) {
-        ws?.send(text)
-        LiveEventLogger.log(LogType.TX, "WS: $text")
+        synchronized(sendOrderLock) {
+            val parsed = runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+            val originalId = parsed?.get("id")?.jsonPrimitive?.content?.toIntOrNull()
+            var actual = text
+            if (originalId != null) {
+                var outgoingId = originalId
+                if (outgoingId <= highestSentId) {
+                    outgoingId = idGen.getAndIncrement()
+                    while (outgoingId <= highestSentId) outgoingId = idGen.getAndIncrement()
+                    val correctedId = outgoingId
+                    actual = buildJsonObject {
+                        for ((key, value) in parsed) put(key, if (key == "id") JsonPrimitive(correctedId) else value)
+                    }.toString()
+                    pendingRequests.remove(originalId)?.let { pendingRequests[correctedId] = it }
+                    if (connectMessageId == originalId) connectMessageId = correctedId
+                    LiveEventLogger.log(LogType.LINK, "WS reordered outgoing ID $originalId -> $correctedId")
+                }
+                highestSentId = outgoingId
+            }
+            ws?.send(actual)
+            // Never expose auth tokens in app logs.
+            val safeLog = if (actual.contains("\"access_token\"")) "WS: auth payload [REDACTED]" else "WS: $actual"
+            LiveEventLogger.log(LogType.TX, safeLog)
+        }
     }
 
     private fun flushPendingMessages() {
