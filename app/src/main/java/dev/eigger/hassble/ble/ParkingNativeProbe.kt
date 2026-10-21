@@ -41,6 +41,12 @@ object ParkingNativeProbe {
     }
     private var activeScanner: android.bluetooth.le.BluetoothLeScanner? = null
     private var generation = 0
+    // Android는 앱(UID) 단위로 30초 안에 startScan을 5번 넘기면 이후 스캔을 조용히 무력화한다(결과 0건).
+    // 요청 재시도마다 스캔을 새로 시작하면 한 번에 2회(PendingIntent+콜백)씩 소모해 곧바로 한도를 넘으므로,
+    // 이미 도는 스캔이 있으면 새로 시작하지 않고 종료 시각만 연장해 재사용한다.
+    private const val SCAN_WINDOW_MS = 22_000L
+    @Volatile private var stopAtMs = 0L
+    private var activeMfr: Int? = null
     @Synchronized
     @SuppressLint("MissingPermission")
     fun start(context: Context, scope: CoroutineScope, device: DeviceConfig, onReading: (RawReading) -> Unit) {
@@ -49,6 +55,13 @@ object ParkingNativeProbe {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)
             != PackageManager.PERMISSION_GRANTED) return
         val scan = bt.bluetoothLeScanner ?: return
+        val nowMs = System.currentTimeMillis()
+        if (current != null && pendingScan != null && activeMfr == manufacturerId && stopAtMs - nowMs > 1_000L) {
+            stopAtMs = nowMs + SCAN_WINDOW_MS
+            LiveEventLogger.log(LogType.LINK,
+                "Parking native scanner: reusing active scan, extended ${SCAN_WINDOW_MS / 1000}s (no new startScan)")
+            return
+        }
         current?.let { old -> runCatching { activeScanner?.stopScan(old) } }
         pendingScan?.let { old -> runCatching { activeScanner?.stopScan(old) }; old.cancel() }
         pendingScan = null
@@ -133,13 +146,19 @@ object ParkingNativeProbe {
             scan.startScan(filters, settings, callback)
             current = callback
             activeScanner = scan
+            activeMfr = manufacturerId
+            stopAtMs = System.currentTimeMillis() + SCAN_WINDOW_MS
             LiveEventLogger.log(LogType.LINK, "Parking native scanner: started independent 22s scan mfrId=$manufacturerId")
         } catch (e: Exception) {
             LiveEventLogger.log(LogType.LINK, "Parking native scanner: start failure=${e.message}")
             return
         }
         scope.launch {
-            delay(22_000L)
+            while (true) {
+                val remaining = stopAtMs - System.currentTimeMillis()
+                if (remaining <= 0L) break
+                delay(remaining)
+            }
             synchronized(this@ParkingNativeProbe) {
                 if (generation == mine) {
                     runCatching { scan.stopScan(callback) }
@@ -148,6 +167,8 @@ object ParkingNativeProbe {
                     pendingHandler = null
                     current = null
                     activeScanner = null
+                    activeMfr = null
+                    stopAtMs = 0L
                     LiveEventLogger.log(LogType.LINK, "Parking native scanner: stopped, callbacks=$seen")
                 }
             }
