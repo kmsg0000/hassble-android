@@ -285,7 +285,7 @@ class HaWsClient(
                 if (originalId <= lastSentId) {
                     val nextId = idGen.updateAndGet { n -> maxOf(n, lastSentId + 2) } - 1
                     wireText = buildJsonObject {
-                        for ((key, value) in parsed) {
+                        for ((key, value) in parsed!!) {
                             put(key, if (key == "id") JsonPrimitive(nextId) else value)
                         }
                     }.toString()
