@@ -280,7 +280,7 @@ class HaWsClient(
             val originalId = parsed?.get("id")?.jsonPrimitive?.content?.toIntOrNull()
             var actual = text
             if (originalId != null) {
-                var outgoingId = originalId
+                var outgoingId: Int = originalId
                 if (outgoingId <= highestSentId) {
                     outgoingId = idGen.getAndIncrement()
                     while (outgoingId <= highestSentId) outgoingId = idGen.getAndIncrement()
