@@ -274,7 +274,7 @@ class HaWsClient(
 
     private fun send(text: String) {
         ws?.send(text)
-        LiveEventLogger.log(LogType.TX, if (text.contains("\\"access_token\\"")) "WS: [auth token redacted]" else "WS: $text")
+        LiveEventLogger.log(LogType.TX, if (text.contains("access_token")) "WS: [auth token redacted]" else "WS: $text")
     }
 
     private fun flushPendingMessages() {
