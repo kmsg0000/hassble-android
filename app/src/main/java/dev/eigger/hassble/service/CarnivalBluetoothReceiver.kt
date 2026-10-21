@@ -50,15 +50,15 @@ class CarnivalBluetoothReceiver : BroadcastReceiver() {
         val recover = app.getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE)
         val last = recover.getLong("carnival_restarted_at", 0L)
         if (now - last < 15_000L) return
-        recover.edit().putLong("carnival_restarted_at", now)
-            .putBoolean("retry_pending", true)
-            .putBoolean("carnival_second_request", true).apply()
-        LiveEventLogger.log(LogType.LINK, "Carnival Hybrid: disconnect -> direct manual-style service Stop/Start")
-        val restart = Intent(app, GatewayProcessRestartService::class.java)
-            .setAction(GatewayProcessRestartService.ACTION_MANUAL_STOP_START)
-        runCatching { ContextCompat.startForegroundService(app, restart) }
+        recover.edit().putLong("carnival_restarted_at", now).apply()
+        // 서비스 Stop/Start 없이 주차위치만 요청한다. 서비스가 이미 떠 있으면 바로 요청하고,
+        // 죽어 있으면 서비스가 저장된 설정으로 올라온 뒤 요청한다(BleGatewayService가 처리).
+        LiveEventLogger.log(LogType.LINK, "Carnival Hybrid: disconnect -> parking request (no service Stop/Start)")
+        val request = Intent(app, BleGatewayService::class.java)
+            .setAction(BleGatewayService.ACTION_CARNIVAL_PARKING_REQUEST)
+        runCatching { ContextCompat.startForegroundService(app, request) }
             .onFailure { e ->
-                LiveEventLogger.log(LogType.LINK, "[Error] Carnival direct restart blocked: ${e.message}")
+                LiveEventLogger.log(LogType.LINK, "[Error] Carnival parking request blocked: ${e.message}")
             }
     }
 }

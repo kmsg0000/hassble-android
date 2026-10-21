@@ -232,6 +232,11 @@ class BleGatewayService : Service() {
             return START_STICKY
         }
 
+        if (intent.action == ACTION_CARNIVAL_PARKING_REQUEST) {
+            handleCarnivalParkingRequest(startId)
+            return START_STICKY
+        }
+
         if (intent.action == ACTION_RELOAD_CONFIG) {
             intent.getStringExtra(EXTRA_GIT_URL)?.let { currentGitUrl = it }
             if (intent.hasExtra(EXTRA_GIT_TOKEN)) {
@@ -723,6 +728,30 @@ class BleGatewayService : Service() {
         }
     }
 
+    /**
+     * 카니발 블루투스 해제 시 호출. 서비스 Stop/Start 없이 주차위치를 요청한다.
+     * - 이미 실행 중(runtime/ws 있음): 즉시 1회, 7초 뒤 1회 더 요청한다. 스캔은 이미 돌고 있다.
+     * - 죽어 있었음: 저장된 설정으로 올린 뒤, 기존 bridgeConnected 경로가 5초 settle 후 2회 요청한다.
+     */
+    private fun handleCarnivalParkingRequest(startId: Int) {
+        val rt = runtime
+        if (rt != null && ws != null) {
+            scope.launch {
+                LiveEventLogger.log(LogType.LINK, "Carnival parking request: service running, requesting now")
+                rt.triggerAdvertise("mytown_parking")
+                delay(7_000L)
+                LiveEventLogger.log(LogType.LINK, "Carnival parking request: second request")
+                rt.triggerAdvertise("mytown_parking")
+            }
+        } else {
+            getSharedPreferences("parking_service_recovery", Context.MODE_PRIVATE).edit()
+                .putBoolean("retry_pending", true)
+                .putBoolean("carnival_second_request", true).apply()
+            LiveEventLogger.log(LogType.LINK, "Carnival parking request: service not running, restoring then requesting")
+            restoreFromSavedSettings(startId)
+        }
+    }
+
     private fun fullProcessRestart() {
         // Samsung/Android에서 BLE scanner가 service 재생성만으로 회복되지 않는 경우가 있다.
         // 별도 프로세스의 helper FGS가 main process 종료를 기다렸다가 저장된 설정으로
@@ -941,6 +970,7 @@ class BleGatewayService : Service() {
         private const val EXTRA_DEVICE_ID = "device_id"
         private const val ACTION_RELOAD_CONFIG = "dev.eigger.hassble.RELOAD_CONFIG"
         const val ACTION_RESTART_FROM_SAVED = "dev.eigger.hassble.RESTART_FROM_SAVED"
+        const val ACTION_CARNIVAL_PARKING_REQUEST = "dev.eigger.hassble.CARNIVAL_PARKING_REQUEST"
         private const val PROCESS_RESTART_STOP_DELAY_MS = 250L
         private const val PROCESS_RESTART_KILL_DELAY_MS = 700L
         private const val ACTION_REMOVE_DEVICE = "dev.eigger.hassble.REMOVE_DEVICE"
