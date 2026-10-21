@@ -2,7 +2,7 @@ name: Build HassBle recovery APK
 on:
   push:
     branches:
-      - fix/parking-restart-readiness-1.9.3
+      - fix/parking-ha-retry-ws-order-1.9.4
   pull_request:
     branches:
       - chatgpt/gateway-controls-1.7.7
@@ -23,6 +23,6 @@ jobs:
           ./gradlew assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: hassble-1.9.3-debug-apk
+          name: hassble-1.9.4-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
