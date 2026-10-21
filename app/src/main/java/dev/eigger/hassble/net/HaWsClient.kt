@@ -76,6 +76,8 @@ class HaWsClient(
         explicitNulls = false
     }
     private val idGen = AtomicInteger(1)
+    private val sendOrderLock = Any()
+    private var lastSentId = 0
     private var ws: WebSocket? = null
     private var connectMessageId: Int? = null
     private var bridgeTimeoutJob: Job? = null
@@ -273,8 +275,36 @@ class HaWsClient(
     val pendingMessageCount: Int get() = pendingMessages.size
 
     private fun send(text: String) {
-        ws?.send(text)
-        LiveEventLogger.log(LogType.TX, "WS: $text")
+        synchronized(sendOrderLock) {
+            // Concurrent BLE callbacks may enqueue ID 44 before ID 43.
+            // Home Assistant requires monotonically increasing IDs in wire order.
+            val parsed = runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+            val originalId = parsed?.get("id")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+            var wireText = text
+            if (originalId != null) {
+                if (originalId <= lastSentId) {
+                    val nextId = idGen.updateAndGet { n -> maxOf(n, lastSentId + 2) } - 1
+                    wireText = buildJsonObject {
+                        for ((key, value) in parsed!!) {
+                            put(key, if (key == "id") JsonPrimitive(nextId) else value)
+                        }
+                    }.toString()
+                    pendingRequests.remove(originalId)?.let { pendingRequests[nextId] = it }
+                    if (connectMessageId == originalId) connectMessageId = nextId
+                    lastSentId = nextId
+                    LiveEventLogger.log(LogType.LINK, "WS id out-of-order corrected")
+                } else {
+                    lastSentId = originalId
+                }
+            }
+            ws?.send(wireText)
+            // Never log HA OAuth/access tokens.
+            if (parsed?.get("type")?.jsonPrimitive?.contentOrNull == "auth") {
+                LiveEventLogger.log(LogType.TX, "WS: auth [token redacted]")
+            } else {
+                LiveEventLogger.log(LogType.TX, "WS: $wireText")
+            }
+        }
     }
 
     private fun flushPendingMessages() {
@@ -283,7 +313,18 @@ class HaWsClient(
             if (queued.isNotEmpty()) {
                 LiveEventLogger.log(LogType.LINK, "WS: flushing ${queued.size} queued message(s) after (re)connect")
             }
-            for (text in queued) send(text)
+            for (text in queued) {
+                // Reassign queued message IDs after ws_bridge/connect so they are
+                // strictly increasing on this connection.
+                val parsed = runCatching { json.parseToJsonElement(text) }.getOrNull()
+                val obj = parsed as? JsonObject
+                if (obj != null && "id" in obj) {
+                    val fresh = buildJsonObject {
+                        for ((key, value) in obj) put(key, if (key == "id") JsonPrimitive(idGen.getAndIncrement()) else value)
+                    }
+                    send(fresh.toString())
+                } else send(text)
+            }
         }
     }
 
