@@ -55,6 +55,16 @@ object ParkingNativeProbe {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)
             != PackageManager.PERMISSION_GRANTED) return
         val scan = bt.bluetoothLeScanner ?: return
+        // 진단: 수동 Stop/Start(성공)와 차량 자동 재시작(실패)의 조건 차이를 로그로 가르기 위한 기록.
+        run {
+            val bgLocation = android.os.Build.VERSION.SDK_INT < 29 || ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val fineLocation = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val interactive = context.getSystemService(android.os.PowerManager::class.java)?.isInteractive
+            LiveEventLogger.log(LogType.LINK,
+                "Parking scan context: fineLocation=$fineLocation, backgroundLocation=$bgLocation, screenOn=$interactive")
+        }
         val nowMs = System.currentTimeMillis()
         if (current != null && pendingScan != null && activeMfr == manufacturerId && stopAtMs - nowMs > 1_000L) {
             stopAtMs = nowMs + SCAN_WINDOW_MS
