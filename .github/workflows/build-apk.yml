@@ -6,6 +6,9 @@ on:
       - 'fix/parking-scan-throttle-**'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,3 +33,21 @@ jobs:
           name: hassble-1.9.6-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Publish APK to a pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts | head -1)
+          TAG="v${VERSION}-debug"
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --title "HassBle ${VERSION} (debug build)" \
+              --notes "Debug-signed test build from ${GITHUB_REF_NAME}. Not a production release."
+          fi
+          echo "Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
