@@ -396,12 +396,16 @@ class BleGatewayService : Service() {
                 if (recoveryPrefs.getBoolean("retry_pending", false)) {
                     recoveryPrefs.edit().putBoolean("retry_pending", false).apply()
                     scope.launch {
-                        delay(700L)
-                        LiveEventLogger.log(LogType.LINK, "Parking service restart complete: retrying location once")
+                        // Automatic Stop/Start restores BLE and HA asynchronously.
+                        // The former 700 ms retry raced with the freshly opened scanner.
+                        // Let the radio scan settle before initiating the request.
+                        delay(5_000L)
+                        LiveEventLogger.log(LogType.LINK, "Parking service restart ready: requesting location after 5s BLE settle")
                         runtime?.triggerAdvertise("mytown_parking")
                         if (recoveryPrefs.getBoolean("carnival_second_request", false)) {
                             recoveryPrefs.edit().putBoolean("carnival_second_request", false).apply()
-                            delay(4_000L)
+                            delay(7_000L)
+                            LiveEventLogger.log(LogType.LINK, "Parking second request after BLE settle")
                             runtime?.triggerAdvertise("mytown_parking")
                         }
                     }
