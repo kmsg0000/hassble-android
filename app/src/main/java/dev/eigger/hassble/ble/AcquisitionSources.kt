@@ -20,6 +20,7 @@ data class RawReading(
     val serviceDataHex: String? = null,
     val fullScanHex: String? = null,
     val isConnectable: Boolean? = null,
+    val rssi: Int? = null,
 )
 
 /** 경로 A: 광고 passive scan. match를 ScanFilter로 변환. */

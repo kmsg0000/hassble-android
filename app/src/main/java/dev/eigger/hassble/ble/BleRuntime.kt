@@ -699,8 +699,44 @@ class BleRuntime(
     }
 
     // ── BLE raw → 디코딩 → 필터 → push ──────────────────────────────────────
-    private fun onReading(r: RawReading) {
+    // 마이타운 요청 중 들어온 응답을 잠시 모아 RSSI가 가장 센(가장 가까운) 비콘 값을 쓴다.
+    private val parkingCandidates = mutableListOf<RawReading>()
+    private var parkingCollectJob: Job? = null
+
+    private fun collectParkingResponse(r: RawReading) {
+        synchronized(parkingCandidates) { parkingCandidates += r }
+        LiveEventLogger.log(LogType.LINK,
+            "Parking response candidate: mac=${r.macAddress}, rssi=${r.rssi}, payload=${r.manufacturerHex?.take(64)}")
+        if (parkingCollectJob?.isActive == true) return
+        parkingTimeoutJob?.cancel()
+        parkingTimeoutJob = null
+        parkingCollectJob = scope.launch {
+            delay(PARKING_COLLECT_WINDOW_MS)
+            val best = synchronized(parkingCandidates) {
+                val b = parkingCandidates.maxByOrNull { it.rssi ?: Int.MIN_VALUE }
+                parkingCandidates.clear()
+                b
+            } ?: return@launch
+            LiveEventLogger.log(LogType.LINK,
+                "Parking response chosen: mac=${best.macAddress}, rssi=${best.rssi} (strongest of window)")
+            try {
+                onReading(best, fromCollectWindow = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                pipelineErrors.record("parking collected reading", e)
+            }
+        }
+    }
+
+    private fun onReading(r: RawReading, fromCollectWindow: Boolean = false) {
         val d = devices[r.deviceId] ?: return
+        if (d.id == "mytown_parking" && d.source == Source.advertisement && !fromCollectWindow &&
+            (parkingCollectJob?.isActive == true || advertiser?.isAdvertising(d.id) == true)
+        ) {
+            collectParkingResponse(r)
+            return
+        }
         val logType = when (d.source) {
             Source.advertisement -> LogType.ADV
             Source.obd, Source.gatt_notify -> LogType.NOTIF
@@ -1225,6 +1261,7 @@ class BleRuntime(
     private data class AdvertisementPresence(val online: Boolean, val lastSeenMs: Long)
 
     companion object {
+        private const val PARKING_COLLECT_WINDOW_MS = 1_500L
         private const val PRESENCE_TICK_MS = 10_000L
         private const val UI_REFRESH_MS = 1_000L
         private const val COLLECTOR_RELAUNCH_DELAY_MS = 5_000L

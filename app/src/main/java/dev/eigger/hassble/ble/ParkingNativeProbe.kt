@@ -126,6 +126,7 @@ object ParkingNativeProbe {
                         serviceDataHex = serviceHex,
                         fullScanHex = fullHex,
                         isConnectable = result.isConnectable,
+                        rssi = result.rssi,
                     ))
                 }
             }
