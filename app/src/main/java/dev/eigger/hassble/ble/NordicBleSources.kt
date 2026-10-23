@@ -342,7 +342,7 @@ class NordicAdvertisementScanner(private val context: Context) : AdvertisementSc
                                         serviceDataHex = serviceDataHex,
                                         fullScanHex = fullScanHex,
                                         isConnectable = isConnectable,
-                                        rssi = result.rssi,
+                                        rssi = result.data?.rssi,
                                     ),
                                 )
                             }
