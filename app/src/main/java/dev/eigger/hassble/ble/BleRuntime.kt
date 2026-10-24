@@ -702,6 +702,10 @@ class BleRuntime(
     // 마이타운 요청 중 들어온 응답을 잠시 모아 RSSI가 가장 센(가장 가까운) 비콘 값을 쓴다.
     private val parkingCandidates = mutableListOf<RawReading>()
     private var parkingCollectJob: Job? = null
+    // 이 앱이 마이타운 요청을 보낸 뒤 응답을 받아들이는 시간. 같은 UUID로 요청하는 다른 장치(예: X3의 ESP32)가
+    // 받은 응답 방송을 요청하지 않은 상태에서 센서로 반영하지 않게 한다.
+    @Volatile private var parkingRequestUntilMs = 0L
+    @Volatile private var parkingIgnoredLogMs = 0L
 
     private fun collectParkingResponse(r: RawReading) {
         synchronized(parkingCandidates) { parkingCandidates += r }
@@ -731,6 +735,20 @@ class BleRuntime(
 
     private fun onReading(r: RawReading, fromCollectWindow: Boolean = false) {
         val d = devices[r.deviceId] ?: return
+        if (d.id == "mytown_parking" && d.source == Source.advertisement && !fromCollectWindow &&
+            parkingCollectJob?.isActive != true && advertiser?.isAdvertising(d.id) != true
+        ) {
+            val now = System.currentTimeMillis()
+            if (now > parkingRequestUntilMs) {
+                // 요청한 적 없는 응답(다른 차량/장치의 요청에 대한 방송)은 무시한다.
+                if (now - parkingIgnoredLogMs > 10_000L) {
+                    parkingIgnoredLogMs = now
+                    LiveEventLogger.log(LogType.LINK,
+                        "Parking response ignored: no request from this app (mac=${r.macAddress}, rssi=${r.rssi})")
+                }
+                return
+            }
+        }
         if (d.id == "mytown_parking" && d.source == Source.advertisement && !fromCollectWindow &&
             (parkingCollectJob?.isActive == true || advertiser?.isAdvertising(d.id) == true)
         ) {
@@ -1039,6 +1057,7 @@ class BleRuntime(
         if (!::config.isInitialized) return
         val d = devices[deviceId] ?: config.devices.firstOrNull { it.id == deviceId } ?: return
         if (deviceId == "mytown_parking") {
+            parkingRequestUntilMs = System.currentTimeMillis() + PARKING_REQUEST_WINDOW_MS
             ParkingBleDiagnostics.start()
             ParkingNativeProbe.start(appContext, scope, d, ::safeOnReading)
             // Refresh a stale native scanner before advertising, not while the response is arriving.
@@ -1262,6 +1281,7 @@ class BleRuntime(
 
     companion object {
         private const val PARKING_COLLECT_WINDOW_MS = 1_500L
+        private const val PARKING_REQUEST_WINDOW_MS = 40_000L
         private const val PRESENCE_TICK_MS = 10_000L
         private const val UI_REFRESH_MS = 1_000L
         private const val COLLECTOR_RELAUNCH_DELAY_MS = 5_000L
