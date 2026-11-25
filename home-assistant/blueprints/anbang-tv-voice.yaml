@@ -1,0 +1,59 @@
+blueprint:
+  name: 안방 TV 한국어 음성 명령
+  description: 컴패니언 앱 Assist에서 말한 명령을 Android TV Remote로 보냅니다.
+  domain: automation
+  input:
+    tv:
+      name: TV 리모컨
+      default: remote.anbang_tv
+      selector:
+        entity:
+          filter:
+            - domain: remote
+              integration: androidtv_remote
+triggers:
+  - trigger: conversation
+    command:
+      - "[안방 TV ]유튜브 (열어 줘|켜 줘|실행해 줘|열어|켜)"
+    id: youtube
+  - trigger: conversation
+    command:
+      - "[안방 TV ]넷플릭스 (열어 줘|켜 줘|실행해 줘|열어|켜)"
+    id: netflix
+  - trigger: conversation
+    command: "[안방 TV ](볼륨|음량|소리) (올려|높여)[ 줘]"
+    id: louder
+  - trigger: conversation
+    command: "[안방 TV ](볼륨|음량|소리) (내려|줄여)[ 줘]"
+    id: quieter
+  - trigger: conversation
+    command: "안방 TV 음소거[ 해 줘]"
+    id: mute
+  - trigger: conversation
+    command: "안방 TV 홈으로"
+    id: home
+  - trigger: conversation
+    command: "안방 TV 뒤로"
+    id: back
+  - trigger: conversation
+    command: "안방 TV 검색어 {query} 입력"
+    id: query
+actions:
+  - choose:
+      - conditions: "{{ trigger.id in ['youtube','netflix'] }}"
+        sequence:
+          - action: remote.turn_on
+            target:
+              entity_id: !input tv
+            data:
+              activity: "{{ 'vnd.youtube://' if trigger.id == 'youtube' else 'netflix://' }}"
+    default:
+      - action: remote.send_command
+        target:
+          entity_id: !input tv
+        data:
+          command: >-
+            {{ 'text:' ~ trigger.slots.query if trigger.id == 'query' else
+               {'louder':'VOLUME_UP','quieter':'VOLUME_DOWN','home':'HOME','mute':'VOLUME_MUTE','back':'BACK'}[trigger.id] }}
+  - set_conversation_response: "안방 TV에 보냈어요."
+mode: queued
