@@ -1,0 +1,37 @@
+blueprint:
+  name: 안방 TV 유튜브·넷플릭스 검색
+  description: 유튜브에서 아이유 검색 또는 넷플릭스에서 오징어 게임 검색이라고 말하세요. 넷플릭스는 먼저 TV 검색 입력칸을 선택하세요.
+  domain: automation
+  input:
+    tv:
+      name: 안방 TV 리모컨
+      default: remote.anbang_tv
+      selector:
+        entity:
+          filter:
+            - domain: remote
+              integration: androidtv_remote
+triggers:
+  - trigger: conversation
+    command: "[안방 TV ]유튜브[에서] {query} 검색[해][ 줘]"
+    id: youtube
+  - trigger: conversation
+    command: "[안방 TV ]넷플릭스[에서] {query} 검색[해][ 줘]"
+    id: netflix
+actions:
+  - choose:
+      - conditions: "{{ trigger.id == 'youtube' }}"
+        sequence:
+          - action: remote.turn_on
+            target:
+              entity_id: !input tv
+            data:
+              activity: "https://www.youtube.com/results?search_query={{ trigger.slots.query | urlencode }}"
+    default:
+      - action: remote.send_command
+        target:
+          entity_id: !input tv
+        data:
+          command: "text:{{ trigger.slots.query }}"
+  - set_conversation_response: "TV에 검색 요청을 보냈어요."
+mode: queued

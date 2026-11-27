@@ -51,7 +51,7 @@ class AndroidRemoteCard extends HTMLElement {
     <div class="tools"><button class="voice">${icon("mic")}<span>음성 명령</span></button><button class="keyboard" aria-label="검색어 입력" aria-expanded="false">${icon("keyboard")}</button></div>
     <form hidden><input aria-label="TV 검색어" placeholder="TV에 보낼 검색어"><button>보내기</button></form><p role="status"></p></div></ha-card>`;
     root.querySelectorAll("[data-search]").forEach(b=>b.onclick=()=>this.listen(b.dataset.search));
-    this.el(".keyboard").onclick=()=>{this.voiceInputMode="query";this.el("form button").textContent="보내기";this.showInput(this.el("form").hidden,true);};
+    this.el(".keyboard").onclick=()=>{this.searchTarget=null;this.voiceInputMode="query";this.el("form button").textContent="보내기";this.showInput(this.el("form").hidden,true);};
     root.querySelectorAll("[data-key]").forEach(b=>b.onclick=()=>this.act("send_command",{command:b.dataset.key}));
     root.querySelectorAll("[data-app]").forEach(b=>{
       let timer,held=false;
@@ -61,7 +61,7 @@ class AndroidRemoteCard extends HTMLElement {
       b.onclick=()=>{if(!held)this.launch(b.dataset.app);held=false};
     });
     this.el(".voice").onclick=()=>this.session?this.stopAudio(this.session):this.listen();
-    this.el("form").onsubmit=async e=>{e.preventDefault();const input=this.el("input"),value=input.value.trim();if(value&&this.voiceInputMode==="command"){this.voiceInputMode="query";this.el("form button").textContent="보내기";await this.recognized(value);return;}if(value&&await this.act("send_command",{command:"text:"+value}))this.say("검색어를 보냈습니다.");};
+    this.el("form").onsubmit=async e=>{e.preventDefault();const input=this.el("input"),value=input.value.trim();if(value&&this.voiceInputMode==="command"){this.voiceInputMode="query";this.el("form button").textContent="보내기";await this.recognized(value);return;}if(value)await this.sendQuery(value,this.searchTarget);};
   }
   showInput(open,focus=false){this.el("form").hidden=!open;this.el(".keyboard").setAttribute("aria-expanded",String(open));if(open&&focus)this.el("input").focus()}
   el(s){return this.shadowRoot.querySelector(s)}
@@ -69,11 +69,16 @@ class AndroidRemoteCard extends HTMLElement {
   set hass(hass){this.ha=hass;if(!this.shadowRoot)return;const tv=hass.states[this.entity];this.el("h2").textContent=tv?.attributes.friendly_name||this.entity;this.el(".status").textContent=!tv?"엔티티 확인 필요":({on:"TV 켜짐",off:"TV 꺼짐",unavailable:"연결 끊김",unknown:"상태 확인 중"}[tv.state]||tv.state);}
   async act(service,data){try{await this.ha.callService("remote",service,{entity_id:this.entity,...data});return true}catch(e){this.say(e.message||"TV 명령 전송 실패");return false}}
   launch(app){return this.act("turn_on",{activity:apps[app]})}
+  async sendQuery(query,app){
+    const youtube=app==="유튜브";
+    const ok=youtube?await this.act("turn_on",{activity:"https://www.youtube.com/results?search_query="+encodeURIComponent(query)}):await this.act("send_command",{command:"text:"+query});
+    if(ok)this.say(youtube?"유튜브에 검색 요청을 보냈습니다.":"TV 검색 입력칸에 문자 전송을 요청했습니다.");
+  }
   async recognized(text,app){
     const action=app?{query:text}:interpret(text);
-    if(action.app && !await this.launch(action.app))return;
+    if(action.app && !action.query && !await this.launch(action.app))return;
     if(action.key){await this.act("send_command",{command:action.key});return}
-    if(action.query){this.showInput(true);this.el("input").value=action.query;this.say("TV에서 검색 입력칸을 선택한 뒤 보내기를 누르세요.")}
+    if(action.query){this.showInput(true);this.el("input").value=action.query;this.searchTarget=app||action.app;await this.sendQuery(action.query,this.searchTarget)}
     else this.say(text);
   }
   stopAudio(s){
@@ -93,16 +98,16 @@ class AndroidRemoteCard extends HTMLElement {
     if(this.session)return;
     if(!navigator.mediaDevices?.getUserMedia){
       const bridge=this.ha.auth?.external;
-      if(!app && bridge?.config?.hasAssist && typeof bridge.fireMessage==="function"){
+      if(bridge?.config?.hasAssist && typeof bridge.fireMessage==="function"){
         bridge.fireMessage({type:"assist/show",payload:{pipeline_id:this.pipeline||"preferred",start_listening:true}});
-        this.say("안방 TV 음성 자동화에 등록한 명령을 말하세요.");
+        this.say(app?"예: "+app+"에서 아이유 검색":"안방 TV 음성 자동화에 등록한 명령을 말하세요.");
         return;
       }
-      this.voiceInputMode=app?"query":"command";
+      this.searchTarget=app;this.voiceInputMode=app?"query":"command";
       this.el("form button").textContent=app?"보내기":"실행";
       this.el("input").value="";
       this.showInput(true,true);
-      if(app && !await this.launch(app))return;
+
       this.say(app?"키보드 마이크로 제목을 말하고 TV 검색칸을 선택한 뒤 보내세요.":"키보드 마이크로 명령을 말한 뒤 실행을 누르세요.");
       return;
     }
@@ -113,7 +118,7 @@ class AndroidRemoteCard extends HTMLElement {
       const stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true}});
       if(this.session!==s){stream.getTracks().forEach(t=>t.stop());return}
       s.stream=stream;
-      if(app && !await this.launch(app)){this.endSession();return}
+
       const con=this.ha.connection;s.socket=con.socket;
       s.source=ctx.createMediaStreamSource(stream);s.node=ctx.createScriptProcessor(2048,1,1);
       s.node.onaudioprocess=e=>{
