@@ -16,10 +16,38 @@ function interpret(text) {
   return {query:text};
 }
 
+const netflixRows=["ㄱㄲㄴㄷㄸ","ㄹㅁㅂㅃㅅ","ㅆㅇㅈㅉㅊ","ㅋㅌㅍㅎ","ㅏㅐㅑㅒㅓ","ㅔㅕㅖㅗㅛ","ㅜㅠㅡㅣ"];
+const initial="ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+const medial="ㅏ ㅐ ㅑ ㅒ ㅓ ㅔ ㅕ ㅖ ㅗ ㅗㅏ ㅗㅐ ㅗㅣ ㅛ ㅜ ㅜㅓ ㅜㅔ ㅜㅣ ㅠ ㅡ ㅡㅣ ㅣ".split(" ");
+const finalJamo=" ㄱ ㄲ ㄱㅅ ㄴ ㄴㅈ ㄴㅎ ㄷ ㄹ ㄹㄱ ㄹㅁ ㄹㅂ ㄹㅅ ㄹㅌ ㄹㅍ ㄹㅎ ㅁ ㅂ ㅂㅅ ㅅ ㅆ ㅇ ㅈ ㅊ ㅋ ㅌ ㅍ ㅎ".split(" ");
+function netflixPlan(title){
+  let row=0,col=0;
+  const steps=[];
+  for(const ch of title.normalize("NFC")){
+    const n=ch.codePointAt(0)-0xac00;
+    const letters=n>=0&&n<11172?initial[Math.floor(n/588)]+medial[Math.floor(n/28)%21]+finalJamo[n%28]:ch;
+    for(const letter of letters){
+      const space=letter===" ";
+      const y=space?0:netflixRows.findIndex(r=>r.includes(letter));
+      if(y<0)throw Error("한글과 띄어쓰기를 입력하세요. 이 자판에 없는 문자: "+letter);
+      const x=space?2:netflixRows[y].indexOf(letter);
+      const lane=Math.min(3,col,x);
+      while(col>lane){steps.push("DPAD_LEFT");col--;}
+      while(row>y){steps.push("DPAD_UP");row--;}
+      while(row<y){steps.push("DPAD_DOWN");row++;}
+      while(col<x){steps.push("DPAD_RIGHT");col++;}
+      if(space)steps.push("DPAD_UP");
+      steps.push("DPAD_CENTER");
+      if(space)steps.push("DPAD_DOWN");
+    }
+  }
+  return steps;
+}
+
 class AndroidRemoteCard extends HTMLElement {
   setConfig(config) {
     if (!config.entity?.startsWith("remote.")) throw Error("안방 TV의 remote 엔티티 ID를 입력하세요.");
-    if(this.entity!==config.entity) this.endSession();
+    if(this.entity!==config.entity){this.endSession();this.closeCapture();this.stopTyping();if(this.shadowRoot){this.searchTarget=null;this.showInput(false);}}
     this.entity=config.entity;this.pipeline=config.pipeline;
     if(this.shadowRoot)return;
     const root=this.attachShadow({mode:"open"});
@@ -41,7 +69,7 @@ class AndroidRemoteCard extends HTMLElement {
     .deck{margin-top:14px;background:linear-gradient(135deg,#294c44,#193b35 72%);border-radius:23px;padding:17px 12px 7px;color:#f7f8ef}.line{gap:clamp(12px,5cqw,25px);justify-content:center}.pad{position:relative;width:clamp(156px,55cqw,219px);aspect-ratio:1;border-radius:50%;background:linear-gradient(145deg,#567367,#34544b 72%);box-shadow:inset 0 1px 1px #89a194,0 3px 7px #102a2480}.pad button{position:absolute;border-radius:50%;width:31%;height:31%;min-height:0}.up{top:1%;left:34.5%}.down{bottom:1%;left:34.5%}.left{top:34.5%;left:1%}.right{top:34.5%;right:1%}.pad .center{width:37%;height:37%;top:31.5%;left:31.5%;color:#233a2e;font-size:17px;background:linear-gradient(145deg,#f0f5d5,#c7dbac);box-shadow:0 2px 5px #153a2c85}.rocker{width:54px;border-radius:26px;background:#16362f;overflow:hidden;text-align:center}.rocker button{width:100%;height:46px}.rocker small{color:#c3d4c7;font-size:11px}.rocker .mute{border-top:1px solid #446255}.rocker .mute svg{width:18px}
     .nav{margin-top:14px;border-top:1px solid #456359}.nav button{flex:1;gap:6px;height:48px;font-size:13px}.nav svg{width:19px}
     .tools{gap:8px;margin-top:12px}.voice{gap:9px;flex:1;border-radius:13px;color:#f8ffef;background:#325e50;height:47px}.keyboard{width:48px;border:1px solid #ced4c6;border-radius:13px;background:#fffef8}.keyboard svg{width:20px}
-    form{gap:6px;margin-top:10px}form[hidden],p:empty{display:none}input{flex:1;width:0;min-height:44px;padding:0 9px;background:white;color:#24342b;border:1px solid #b7c5ba;border-radius:10px}form button{background:#e0e8d3;border-radius:10px;padding:0 13px}p{margin:9px 2px 0;color:#3d5148;font-size:12px;line-height:1.5}
+    form{gap:6px;margin-top:10px}form[hidden],.stop[hidden],p:empty{display:none}input{flex:1;width:0;min-height:44px;padding:0 9px;background:white;color:#24342b;border:1px solid #b7c5ba;border-radius:10px}form button{background:#e0e8d3;border-radius:10px;padding:0 13px}p{margin:9px 2px 0;color:#3d5148;font-size:12px;line-height:1.5}
     @container(max-width:310px){header{padding:12px}.body{padding:10px}.app .open{font-size:14px}.youtube i{display:none}.nav button{gap:3px;font-size:12px}}
     </style><ha-card><header><span class="tv">${icon("tv")}</span><div class="identity"><h2>안방 TV</h2><span class="status"></span></div>${key("POWER","전원","power","power")}</header>
     <div class="body"><div class="actions">${["넷플릭스","유튜브"].map((app,i)=>`<div class="app ${i?"youtube":"netflix"}"><button class="open" data-app="${app}" aria-label="${app} 열기">${i?"<i>▸</i>YouTube":"NETFLIX"}</button><button class="appmic" data-search="${app}" aria-label="${app} 음성 검색">${icon("mic")}</button></div>`).join("")}</div>
@@ -49,10 +77,11 @@ class AndroidRemoteCard extends HTMLElement {
     <div class="rocker">${key("VOLUME_UP","음량 올리기","plus")}<small>음량</small>${key("VOLUME_DOWN","음량 내리기","minus")}${key("VOLUME_MUTE","음소거","mute","mute")}</div></div>
     <div class="nav">${key("BACK","뒤로","back","",true)}${key("HOME","홈","home","",true)}${key("MEDIA_PLAY_PAUSE","재생·정지","play","",true)}</div></div>
     <div class="tools"><button class="voice">${icon("mic")}<span>음성 명령</span></button><button class="keyboard" aria-label="검색어 입력" aria-expanded="false">${icon("keyboard")}</button></div>
-    <form hidden><input aria-label="TV 검색어" placeholder="TV에 보낼 검색어"><button>보내기</button></form><p role="status"></p></div></ha-card>`;
+    <form hidden><input aria-label="TV 검색어" placeholder="TV에 보낼 검색어"><button>보내기</button></form><button class="stop" hidden>자판 입력 중지</button><p role="status"></p></div></ha-card>`;
+    this.el(".stop").onclick=()=>this.stopTyping();
     root.querySelectorAll("[data-search]").forEach(b=>b.onclick=()=>this.listen(b.dataset.search));
-    this.el(".keyboard").onclick=()=>{this.searchTarget=null;this.voiceInputMode="query";this.el("form button").textContent="보내기";this.showInput(this.el("form").hidden,true);};
-    root.querySelectorAll("[data-key]").forEach(b=>b.onclick=()=>this.act("send_command",{command:b.dataset.key}));
+    this.el(".keyboard").onclick=()=>{this.closeCapture();this.stopTyping();this.searchTarget=null;this.voiceInputMode="query";this.el("form button").textContent="보내기";this.showInput(this.el("form").hidden,true);};
+    root.querySelectorAll("[data-key]").forEach(b=>b.onclick=()=>{this.stopTyping();this.act("send_command",{command:b.dataset.key});});
     root.querySelectorAll("[data-app]").forEach(b=>{
       let timer,held=false;
       b.onpointerdown=()=>{held=false;timer=setTimeout(()=>{held=true;this.listen(b.dataset.app)},500)};
@@ -61,15 +90,16 @@ class AndroidRemoteCard extends HTMLElement {
       b.onclick=()=>{if(!held)this.launch(b.dataset.app);held=false};
     });
     this.el(".voice").onclick=()=>this.session?this.stopAudio(this.session):this.listen();
-    this.el("form").onsubmit=async e=>{e.preventDefault();const input=this.el("input"),value=input.value.trim();if(value&&this.voiceInputMode==="command"){this.voiceInputMode="query";this.el("form button").textContent="보내기";await this.recognized(value);return;}if(value)await this.sendQuery(value,this.searchTarget);};
+    this.el("form").onsubmit=async e=>{e.preventDefault();const input=this.el("input"),value=input.value.trim();if(value&&this.voiceInputMode==="command"){this.voiceInputMode="query";this.el("form button").textContent="보내기";await this.recognized(value);return;}if(value && this.searchTarget==="넷플릭스"){this.closeCapture();await this.typeNetflix(value);}else if(value)await this.sendQuery(value,this.searchTarget);};
   }
   showInput(open,focus=false){this.el("form").hidden=!open;this.el(".keyboard").setAttribute("aria-expanded",String(open));if(open&&focus)this.el("input").focus()}
   el(s){return this.shadowRoot.querySelector(s)}
   say(text){this.el("p").textContent=text}
   set hass(hass){this.ha=hass;if(!this.shadowRoot)return;const tv=hass.states[this.entity];this.el("h2").textContent=tv?.attributes.friendly_name||this.entity;this.el(".status").textContent=!tv?"엔티티 확인 필요":({on:"TV 켜짐",off:"TV 꺼짐",unavailable:"연결 끊김",unknown:"상태 확인 중"}[tv.state]||tv.state);}
   async act(service,data){try{await this.ha.callService("remote",service,{entity_id:this.entity,...data});return true}catch(e){this.say(e.message||"TV 명령 전송 실패");return false}}
-  launch(app){return this.act("turn_on",{activity:apps[app]})}
+  launch(app){this.closeCapture();this.stopTyping();return this.act("turn_on",{activity:apps[app]})}
   async sendQuery(query,app){
+    if(app==="넷플릭스"){this.prepareNetflix(query);return;}
     const youtube=app==="유튜브";
     const ok=youtube?await this.act("turn_on",{activity:"https://www.youtube.com/results?search_query="+encodeURIComponent(query)}):await this.act("send_command",{command:"text:"+query});
     if(ok)this.say(youtube?"유튜브에 검색 요청을 보냈습니다.":"TV 검색 입력칸에 문자 전송을 요청했습니다.");
@@ -80,6 +110,57 @@ class AndroidRemoteCard extends HTMLElement {
     if(action.key){await this.act("send_command",{command:action.key});return}
     if(action.query){this.showInput(true);this.el("input").value=action.query;this.searchTarget=app||action.app;await this.sendQuery(action.query,this.searchTarget)}
     else this.say(text);
+  }
+  stopTyping(){if(this.running){this.running=null;this.el(".stop").hidden=true;this.say("입력을 중지했습니다.");}}
+  async typeNetflix(value){
+    if(this.running)return;
+    let keys;
+    try{keys=netflixPlan(value);}catch(e){this.say(e.message);return;}
+    const run={};this.running=run;this.el(".stop").hidden=false;
+    this.say("TV 자판에 입력 중…");
+    try{
+      for(const key of keys){
+        if(this.running!==run)return;
+        if(!await this.act("send_command",{command:key}))return;
+        await new Promise(resolve=>setTimeout(resolve,key==="DPAD_CENTER"?230:130));
+      }
+      if(this.running===run)this.say("방향키 입력을 마쳤습니다. TV 검색 결과를 확인하세요.");
+    }finally{if(this.running===run){this.running=null;this.el(".stop").hidden=true;}}
+  }
+  prepareNetflix(title,focus=false){
+    this.searchTarget="넷플릭스";this.voiceInputMode="query";this.showInput(true,focus);
+    this.el("input").value=title;this.el("form button").textContent="입력 시작";
+    this.say("TV 한글 자판에서 첫 ㄱ에 선택 표시만 맞추고 여기서 입력 시작을 누르세요.");
+  }
+  closeCapture(){
+    const c=this.capture;if(!c)return;
+    this.capture=null;clearTimeout(c.timer);if(c.unsubscribe)c.unsubscribe().catch(()=>{});
+  }
+  async nativeTitle(bridge){
+    this.closeCapture();
+    this.prepareNetflix("");
+    if(!this.ha.user?.is_admin){
+      this.showInput(true,true);this.say("휴대폰 키보드의 마이크로 제목을 받아쓴 뒤, TV 선택을 ㄱ에 놓고 입력 시작을 누르세요.");return;
+    }
+    const c={};this.capture=c;
+    try{
+      const unsub=await this.ha.connection.subscribeMessage(event=>{
+        if(this.capture!==c)return;
+        const t=event.variables?.trigger;
+        const user=t?.user_input?.context?.user_id||event.context?.user_id;
+        const title=t?.slots?.title;
+        if(user!==this.ha.user.id||typeof title!=="string"||!title.trim())return;
+        this.closeCapture();this.prepareNetflix(title.trim());
+      },{type:"subscribe_trigger",trigger:{platform:"conversation",command:["제목 {title}"]}},{resubscribe:false});
+      if(this.capture!==c){await unsub();return;}
+      c.unsubscribe=unsub;
+      c.timer=setTimeout(()=>{if(this.capture===c){this.closeCapture();this.say("제목을 받지 못했습니다. 검색어 칸의 키보드 마이크로 받아쓸 수 있습니다.");}},90000);
+      this.say("Assist에 ‘제목 오징어 게임’처럼 말한 뒤 카드로 돌아오세요.");
+      bridge.fireMessage({type:"assist/show",payload:{pipeline_id:this.pipeline||"preferred",start_listening:true}});
+    }catch(e){
+      if(this.capture!==c)return;
+      this.closeCapture();this.showInput(true,true);this.say("검색어 칸을 누르고 휴대폰 키보드 마이크로 제목을 말하세요.");
+    }
   }
   stopAudio(s){
     if(s.ended)return;s.ended=true;
@@ -93,16 +174,19 @@ class AndroidRemoteCard extends HTMLElement {
     if(s.unsubscribe)s.unsubscribe().catch(()=>{});
     this.el(".voice").disabled=false;this.el(".voice span").textContent="음성 명령";
   }
-  disconnectedCallback(){this.endSession()}
+  disconnectedCallback(){this.endSession();this.closeCapture();this.stopTyping()}
   async listen(app){
     if(this.session)return;
+    this.closeCapture();this.stopTyping();
     if(!navigator.mediaDevices?.getUserMedia){
       const bridge=this.ha.auth?.external;
       if(bridge?.config?.hasAssist && typeof bridge.fireMessage==="function"){
+        if(app==="넷플릭스"){await this.nativeTitle(bridge);return;}
         bridge.fireMessage({type:"assist/show",payload:{pipeline_id:this.pipeline||"preferred",start_listening:true}});
         this.say(app?"예: "+app+"에서 아이유 검색":"안방 TV 음성 자동화에 등록한 명령을 말하세요.");
         return;
       }
+      if(app==="넷플릭스"){this.prepareNetflix("",true);this.say("키보드 마이크로 제목을 말하고 TV 선택을 ㄱ에 놓은 뒤 입력 시작을 누르세요.");return;}
       this.searchTarget=app;this.voiceInputMode=app?"query":"command";
       this.el("form button").textContent=app?"보내기":"실행";
       this.el("input").value="";
@@ -135,10 +219,10 @@ class AndroidRemoteCard extends HTMLElement {
         if(ev.type==="run-start")s.id=ev.data.runner_data.stt_binary_handler_id;
         if(ev.type==="stt-start"){s.source.connect(s.node);s.node.connect(ctx.destination);this.el(".voice span").textContent="말하기 완료";this.el(".voice").disabled=false;this.say(app?"검색할 제목을 말하세요.":"예: 유튜브 열어 줘, 볼륨 올려 줘");s.limit=setTimeout(()=>this.stopAudio(s),10000);}
         if(ev.type==="stt-end"){const t=ev.data.stt_output?.text?.trim();this.endSession();if(t)this.recognized(t,app);else this.say("다시 말해 주세요.");}
-        if(ev.type==="error"||ev.type==="run-end"){this.endSession();this.say(ev.data?.message||"음성을 인식하지 못했습니다.");}
+        if(ev.type==="error"||ev.type==="run-end"){this.endSession();if(app==="넷플릭스")this.prepareNetflix("");this.say((ev.data?.message||"음성을 인식하지 못했습니다.")+(app==="넷플릭스"?" · 검색어 칸의 키보드 마이크도 사용할 수 있습니다.":""));}
       },msg,{resubscribe:false});
       if(this.session===s)s.unsubscribe=unsub;else unsub().catch(()=>{});
-    }catch(e){if(this.session===s){this.endSession();this.say(e.message||"마이크 권한과 HA 음성 도우미 설정을 확인하세요.")}}
+    }catch(e){if(this.session===s){this.endSession();if(app==="넷플릭스"){this.prepareNetflix("");this.say("음성 인식 실패 · 검색어 칸을 눌러 키보드 마이크로 제목을 입력하세요.");}else this.say(e.message||"마이크 권한과 HA 음성 도우미 설정을 확인하세요.")}}
   }
   getCardSize(){return 7}
 }
